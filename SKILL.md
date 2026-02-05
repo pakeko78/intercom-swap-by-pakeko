@@ -148,10 +148,11 @@ pear -v
 - If you’re working in a separate workspace, clone **inside that workspace**:
 ```bash
 git clone https://github.com/Trac-Systems/intercom ./intercom
-cd intercom/trac/contract-test-latest
+cd intercom
+cd trac/contract-test-latest
 npm install
 ```
-All paths below assume you are working from **`intercom/trac/contract-test-latest`** (relative to the cloned repo).
+All commands below assume you are working from the **`contract-test-latest` app folder** inside the repo.
 
 ### Core Updates (npm + Pear)
 Use this for dependency refreshes and runtime updates only. **Do not change repo pins** unless explicitly instructed.
@@ -160,7 +161,7 @@ Questions to ask first:
 - Updating **npm deps**, **Pear runtime**, or **both**?
 - Any peers running that must be stopped?
 
-Commands (run in `intercom/trac/contract-test-latest`):
+Commands (run in the `contract-test-latest` app folder):
 ```bash
 # ensure Node 22
 node -v

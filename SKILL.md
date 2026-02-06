@@ -62,7 +62,9 @@ These choices should be surfaced as the initial configuration flow for the skill
 Use Pear runtime only (never native node).
 
 ### Prerequisites (Node + Pear)
-Intercom requires **Node.js 22.x exactly** and the **Pear runtime**. If you have any other Node version, switch to 22 using a version manager. **Do not install Pear unless `node -v` is 22.x.**
+Intercom requires **Node.js >= 22** and the **Pear runtime**.
+
+Recommended: standardize on **Node 22.x** for consistency (Pear runtime + native deps tend to be most stable there). If you run Node 23.x and hit Pear install/runtime issues, switch to Node 22.x before debugging further.
 **Preferred version manager:** `nvm` (macOS/Linux) and `nvm-windows` (Windows).
 
 macOS (Homebrew + nvm fallback):
@@ -119,7 +121,7 @@ volta install node@22
 node -v
 ```
 
-Install Pear runtime (all OS, **requires Node 22.x**):
+Install Pear runtime (all OS, **requires Node >= 22**):
 ```bash
 npm install -g pear
 pear -v
@@ -267,7 +269,7 @@ Sidechannels:
 - **`0000intercom` (entry):** name‑only, open to all, **no owner / welcome / invite** checks.
 - **Public channels:** require **owner‑signed welcome** by default (unless you disable welcome enforcement).
 - **Owner‑only channels:** same as public, plus **only the owner pubkey can send**.
-- **Invite‑only channels:** **invite required + welcome required**.
+- **Invite‑only channels:** **invite required + welcome required**, and **payloads are only sent to authorized peers** (confidential even if an uninvited/malicious peer connects to the topic).
 
 SC-Bridge (WebSocket):
 - `--sc-bridge 1` : enable WebSocket bridge for sidechannels.
@@ -420,6 +422,14 @@ Intercom must expose and describe all interactive commands so agents can operate
 - **Dynamic channel requests**: `/sc_open` posts a request in the entry channel; you can auto‑join with `--sidechannel-auto-join 1`.
 - **Invites**: uses the **peer pubkey** (transport identity). Invites may also include the inviter’s **trac address** for payments, but verification is by peer pubkey.
 - **Invite delivery**: the invite is a signed JSON/base64 blob. You can deliver it via `0000intercom` **or** out‑of‑band (email, website, QR, etc.).
+- **Invite-only confidentiality (important):**
+  - Sidechannel topics are **public and deterministic** (anyone can join the topic if they know the name).
+  - Invite-only channels are therefore enforced as an **authorization boundary**, not a discovery boundary:
+    - Uninvited peers may still connect and open the protocol, but **they will not receive payloads**.
+    - Sender-side gating: for invite-only channels, outbound `broadcast()` only sends to connections that have proven a valid invite.
+    - Relay stays enabled, but relays only forward to **authorized** peers and **never** relays `control:auth` / `control:welcome`.
+  - Debugging: with `--sidechannel-debug 1`, you will see `skip (unauthorized) <pubkey>` when an uninvited peer is connected.
+- **Topic collisions:** topics are derived via SHA-256 from `sidechannel:<channelName>` (collision-resistant). Avoid relying on legacy topic derivation.
 - **Welcome**: required for **all** sidechannels (public + invite‑only) **except** `0000intercom`.  
   Configure `--sidechannel-owner` on **every peer** that should accept a channel, and distribute the owner‑signed welcome via `--sidechannel-welcome` (or include it in `/sc_open` / `/sc_invite`).
 - **Joiner startup requirement:** `/sc_join` only subscribes. It does **not** set the owner key.  
@@ -456,6 +466,9 @@ Intercom must expose and describe all interactive commands so agents can operate
   Do **not** hide them behind a file path.
 - **Always print a fully‑expanded joiner command** (no placeholders like `<ownerPubkey>`).  
   File paths may be included as **optional** references only.
+- **Commands must be copy/paste safe:**
+  - Print commands as a **single line** (never wrap flags or split base64 across lines).
+  - If a command would be too long (welcome/invite b64), generate a **run script** and/or write the invite JSON to a file and use `--invite @/path/to/invite.json`.
 
 ## SC‑Bridge (WebSocket) Protocol
 SC‑Bridge exposes sidechannel messages over WebSocket and accepts inbound commands.

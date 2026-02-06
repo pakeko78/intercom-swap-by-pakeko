@@ -309,6 +309,7 @@ Agents can request new channels dynamically in the entry channel. This enables c
 
 ## Typical Requests and How to Respond
 When a human asks for something, translate it into the minimal set of flags/commands and ask for any missing details.
+If the request implies running additional peers (e.g. relay-only peers for robustness), ask the human whether they want that. Do not auto-start extra instances.
 
 **Create my channel, only I can post.**  
 Ask for: channel name, owner pubkey (if not this peer).  
@@ -450,12 +451,13 @@ Intercom must expose and describe all interactive commands so agents can operate
     - Sender-side gating: for invite-only channels, outbound `broadcast()` only sends to connections that have proven a valid invite.
     - Relay stays enabled, but relays only forward to **authorized** peers and **never** relays `control:auth` / `control:welcome`.
   - Debugging: with `--sidechannel-debug 1`, you will see `skip (unauthorized) <pubkey>` when an uninvited peer is connected.
-  - **Robust invite-only relaying (recommended):**
+  - **Robust invite-only relaying (optional):**
     - To improve delivery when peers are not fully meshed, run **3-5 always-on relay-only peers** you control (in different networks/hosts) and **invite them** into protected channels (e.g. `swap:<id>`).
     - Keep relay peers inert:
       - do not load any chain credentials on them (no LN/Solana keys)
       - prefer `--sidechannel-owner-write-only 1` so they cannot broadcast non-auth payloads
       - they should only connect, authorize via invite, and relay what they receive.
+    - Do **not** auto-spawn these relay peers by default. If a workflow would add extra instances, ask the human first.
     - Tradeoff: any invited relay peer can see channel plaintext. If you require “relays cannot read”, you need message-level encryption (ciphertext relay).
 - **Topic collisions:** topics are derived via SHA-256 from `sidechannel:<channelName>` (collision-resistant). Avoid relying on legacy topic derivation.
 - **Welcome**: required for **all** sidechannels (public + invite‑only) **except** `0000intercom`.  

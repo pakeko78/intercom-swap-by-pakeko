@@ -1,6 +1,6 @@
 ---
 name: intercomswap
-description: Install and operate Intercom Swap: a fork of Intercom (upstream: https://github.com/Trac-Systems/intercom) that negotiates P2P request-for-quote (RFQ) swaps over Intercom sidechannels and settles BTC(LN) <> USDT(Solana) via a shared Solana escrow program, with deterministic operator tooling, recovery, and unattended e2e tests.
+description: "Install and operate Intercom Swap: a fork of Intercom (upstream: https://github.com/Trac-Systems/intercom) that negotiates P2P request-for-quote (RFQ) swaps over Intercom sidechannels and settles BTC(LN) <> USDT(Solana) via a shared Solana escrow program, with deterministic operator tooling, recovery, and unattended e2e tests."
 ---
 
 # Intercom Swap

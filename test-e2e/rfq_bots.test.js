@@ -12,7 +12,7 @@ import PeerWallet from 'trac-wallet';
 import DHT from 'hyperdht';
 
 import { ScBridgeClient } from '../src/sc-bridge/client.js';
-import { createUnsignedEnvelope, attachSignature } from '../src/protocol/signedMessage.js';
+import { createUnsignedEnvelope, attachSignature, signUnsignedEnvelopeHex } from '../src/protocol/signedMessage.js';
 import { createSignedWelcome, signPayloadHex, toB64Json } from '../src/sidechannel/capabilities.js';
 import { KIND, PAIR, ASSET } from '../src/swap/constants.js';
 import { hashUnsignedEnvelope } from '../src/swap/hash.js';
@@ -64,6 +64,11 @@ async function writePeerKeypair({ storesDir, storeName }) {
     pubHex: b4a.toString(wallet.publicKey, 'hex'),
     secHex: b4a.toString(wallet.secretKey, 'hex'),
   };
+}
+
+function signEnvelope(unsignedEnvelope, keys) {
+  const sigHex = signUnsignedEnvelopeHex(unsignedEnvelope, keys.secHex);
+  return attachSignature(unsignedEnvelope, { signerPubKeyHex: keys.pubHex, sigHex });
 }
 
 async function pickFreePort() {
@@ -237,7 +242,7 @@ test('e2e: RFQ maker/taker bots negotiate and join swap channel (sidechannel inv
   const takerStore = `e2e-rfq-taker-${runId}`;
 
   const makerKeys = await writePeerKeypair({ storesDir, storeName: makerStore });
-  await writePeerKeypair({ storesDir, storeName: takerStore });
+  const takerKeys = await writePeerKeypair({ storesDir, storeName: takerStore });
 
   const signMakerHex = (payload) => signPayloadHex(payload, makerKeys.secHex);
   const rfqWelcome = createSignedWelcome(
@@ -390,32 +395,36 @@ test('e2e: RFQ maker/taker bots negotiate and join swap channel (sidechannel inv
   makerSc.close();
   takerSc.close();
 
-  const makerBot = spawnBot(
-    [
-      'scripts/rfq-maker.mjs',
-      '--url',
-      `ws://127.0.0.1:${makerPort}`,
-      '--token',
-      makerToken,
-      '--rfq-channel',
-      rfqChannel,
-      '--once',
-      '1',
+	  const makerBot = spawnBot(
+	    [
+	      'scripts/rfq-maker.mjs',
+	      '--url',
+	      `ws://127.0.0.1:${makerPort}`,
+	      '--token',
+	      makerToken,
+	      '--peer-keypair',
+	      makerKeys.keyPairPath,
+	      '--rfq-channel',
+	      rfqChannel,
+	      '--once',
+	      '1',
     ],
     { label: 'maker-bot' }
   );
 
-  const takerBot = spawnBot(
-    [
-      'scripts/rfq-taker.mjs',
-      '--url',
-      `ws://127.0.0.1:${takerPort}`,
-      '--token',
-      takerToken,
-      '--rfq-channel',
-      rfqChannel,
-      '--once',
-      '1',
+	  const takerBot = spawnBot(
+	    [
+	      'scripts/rfq-taker.mjs',
+	      '--url',
+	      `ws://127.0.0.1:${takerPort}`,
+	      '--token',
+	      takerToken,
+	      '--peer-keypair',
+	      takerKeys.keyPairPath,
+	      '--rfq-channel',
+	      rfqChannel,
+	      '--once',
+	      '1',
       '--timeout-sec',
       '30',
     ],
@@ -473,7 +482,7 @@ test('e2e: maker rejects quote_accept from non-RFQ signer (prevents quote hijack
 
   const makerKeys = await writePeerKeypair({ storesDir, storeName: makerStore });
   const takerKeys = await writePeerKeypair({ storesDir, storeName: takerStore });
-  await writePeerKeypair({ storesDir, storeName: attackerStore });
+	  const attackerKeys = await writePeerKeypair({ storesDir, storeName: attackerStore });
 
   const signMakerHex = (payload) => signPayloadHex(payload, makerKeys.secHex);
   const rfqWelcome = createSignedWelcome(
@@ -681,17 +690,19 @@ test('e2e: maker rejects quote_accept from non-RFQ signer (prevents quote hijack
   ensureOk(await attackerSc.join(rfqChannel), `join ${rfqChannel} (attacker)`);
   ensureOk(await takerSc.subscribe([rfqChannel]), `subscribe ${rfqChannel} (taker)`);
 
-  const makerBot = spawnBot(
-    [
-      'scripts/rfq-maker.mjs',
-      '--url',
-      `ws://127.0.0.1:${makerPort}`,
-      '--token',
-      makerToken,
-      '--rfq-channel',
-      rfqChannel,
-      '--price-guard',
-      '0',
+	  const makerBot = spawnBot(
+	    [
+	      'scripts/rfq-maker.mjs',
+	      '--url',
+	      `ws://127.0.0.1:${makerPort}`,
+	      '--token',
+	      makerToken,
+	      '--peer-keypair',
+	      makerKeys.keyPairPath,
+	      '--rfq-channel',
+	      rfqChannel,
+	      '--price-guard',
+	      '0',
       '--once',
       '1',
     ],
@@ -700,22 +711,20 @@ test('e2e: maker rejects quote_accept from non-RFQ signer (prevents quote hijack
 
   const tradeId = `swap_${crypto.randomUUID()}`;
   const nowSec = Math.floor(Date.now() / 1000);
-  const rfqUnsigned = createUnsignedEnvelope({
-    v: 1,
-    kind: KIND.RFQ,
-    tradeId,
+	  const rfqUnsigned = createUnsignedEnvelope({
+	    v: 1,
+	    kind: KIND.RFQ,
+	    tradeId,
     body: {
       rfq_channel: rfqChannel,
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
       btc_sats: 10000,
       usdt_amount: '1234567',
-      valid_until_unix: nowSec + 60,
-    },
-  });
-  const sig = await takerSc.sign(rfqUnsigned);
-  assert.equal(sig.type, 'signed');
-  const rfqSigned = attachSignature(rfqUnsigned, { signerPubKeyHex: sig.signer, sigHex: sig.sig });
+	      valid_until_unix: nowSec + 60,
+	    },
+	  });
+	  const rfqSigned = signEnvelope(rfqUnsigned, takerKeys);
 
   // Maker bot might not be subscribed yet; resend RFQ until we see a quote.
   let rfqStop = false;
@@ -740,18 +749,16 @@ test('e2e: maker rejects quote_accept from non-RFQ signer (prevents quote hijack
   const quoteId = hashUnsignedEnvelope(stripSignature(quote));
   const rfqId = String(quote.body?.rfq_id || '').trim().toLowerCase();
 
-  const attackerAcceptUnsigned = createUnsignedEnvelope({
-    v: 1,
-    kind: KIND.QUOTE_ACCEPT,
-    tradeId,
-    body: { rfq_id: rfqId, quote_id: quoteId },
-  });
-  {
-    const sig = await attackerSc.sign(attackerAcceptUnsigned);
-    assert.equal(sig.type, 'signed');
-    const qa = attachSignature(attackerAcceptUnsigned, { signerPubKeyHex: sig.signer, sigHex: sig.sig });
-    ensureOk(await attackerSc.send(rfqChannel, qa), 'send attacker quote_accept');
-  }
+	  const attackerAcceptUnsigned = createUnsignedEnvelope({
+	    v: 1,
+	    kind: KIND.QUOTE_ACCEPT,
+	    tradeId,
+	    body: { rfq_id: rfqId, quote_id: quoteId },
+	  });
+	  {
+	    const qa = signEnvelope(attackerAcceptUnsigned, attackerKeys);
+	    ensureOk(await attackerSc.send(rfqChannel, qa), 'send attacker quote_accept');
+	  }
 
   // Maker must ignore the hijack accept (no swap invite should be broadcast).
   await expectNoSidechannel(takerSc, {
@@ -762,18 +769,16 @@ test('e2e: maker rejects quote_accept from non-RFQ signer (prevents quote hijack
   });
 
   // Legit accept from the RFQ signer should succeed.
-  const takerAcceptUnsigned = createUnsignedEnvelope({
-    v: 1,
-    kind: KIND.QUOTE_ACCEPT,
-    tradeId,
-    body: { rfq_id: rfqId, quote_id: quoteId },
-  });
-  {
-    const sig = await takerSc.sign(takerAcceptUnsigned);
-    assert.equal(sig.type, 'signed');
-    const qa = attachSignature(takerAcceptUnsigned, { signerPubKeyHex: sig.signer, sigHex: sig.sig });
-    ensureOk(await takerSc.send(rfqChannel, qa), 'send taker quote_accept');
-  }
+	  const takerAcceptUnsigned = createUnsignedEnvelope({
+	    v: 1,
+	    kind: KIND.QUOTE_ACCEPT,
+	    tradeId,
+	    body: { rfq_id: rfqId, quote_id: quoteId },
+	  });
+	  {
+	    const qa = signEnvelope(takerAcceptUnsigned, takerKeys);
+	    ensureOk(await takerSc.send(rfqChannel, qa), 'send taker quote_accept');
+	  }
 
   const inviteEvt = await waitForSidechannel(takerSc, {
     channel: rfqChannel,

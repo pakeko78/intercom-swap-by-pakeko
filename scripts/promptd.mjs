@@ -96,6 +96,11 @@ async function main() {
             // "maker" or "taker" (used only for system prompt guidance; does not grant permissions).
             role: 'maker',
           },
+          peer: {
+            // Peer wallet keypair file used to sign sidechannel envelopes locally.
+            // Must match the running peer behind SC-Bridge (stores/<store>/db/keypair.json).
+            keypair: 'stores/<store>/db/keypair.json',
+          },
           llm: {
             base_url: 'http://127.0.0.1:8000/v1',
             api_key: '',
@@ -162,6 +167,7 @@ async function main() {
 
   const executor = new ToolExecutor({
     scBridge: setup.scBridge,
+    peer: setup.peer,
     ln: setup.ln,
     solana: setup.solana,
     receipts: setup.receipts,

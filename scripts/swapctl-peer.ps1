@@ -19,5 +19,10 @@ if (-not (Test-Path -Path $tokenFile)) {
 
 $scToken = (Get-Content -Raw -Path $tokenFile).Trim()
 
-node scripts/swapctl.mjs --url ("ws://127.0.0.1:{0}" -f $scPort) --token $scToken @rest
+$keypairFile = Join-Path $root ("stores/{0}/db/keypair.json" -f $storeName)
+if (Test-Path -Path $keypairFile) {
+  node scripts/swapctl.mjs --url ("ws://127.0.0.1:{0}" -f $scPort) --token $scToken --peer-keypair $keypairFile @rest
+  exit $LASTEXITCODE
+}
 
+node scripts/swapctl.mjs --url ("ws://127.0.0.1:{0}" -f $scPort) --token $scToken @rest

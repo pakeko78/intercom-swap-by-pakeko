@@ -23,7 +23,6 @@ import {
 import { ScBridgeClient } from '../src/sc-bridge/client.js';
 import {
   createUnsignedEnvelope,
-  attachSignature,
 } from '../src/protocol/signedMessage.js';
 import { KIND, ASSET, PAIR, STATE } from '../src/swap/constants.js';
 import { hashUnsignedEnvelope } from '../src/swap/hash.js';
@@ -319,15 +318,6 @@ async function killProc(proc) {
   }
 }
 
-async function signEnvelopeViaBridge(sc, unsignedEnvelope) {
-  const res = await sc.sign(unsignedEnvelope);
-  assert.equal(res.type, 'signed');
-  return attachSignature(unsignedEnvelope, {
-    signerPubKeyHex: String(res.signer || '').toLowerCase(),
-    sigHex: String(res.sig || '').toLowerCase(),
-  });
-}
-
 async function waitFor(predicate, { timeoutMs = 10_000, intervalMs = 50, label = 'waitFor' } = {}) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -554,7 +544,7 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
       '--msb-store-name',
       `${aliceStore}-msb`,
       '--subnet-channel',
-      `e2e-subnet-${runId}-a`,
+      `e2e-subnet-${runId}`,
       '--dht-bootstrap',
       dhtBootstrap,
       '--msb',
@@ -604,7 +594,7 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
       '--msb-store-name',
       `${bobStore}-msb`,
       '--subnet-channel',
-      `e2e-subnet-${runId}-b`,
+      `e2e-subnet-${runId}`,
       '--dht-bootstrap',
       dhtBootstrap,
       '--msb',
@@ -655,7 +645,7 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
       '--msb-store-name',
       `${eveStore}-msb`,
       '--subnet-channel',
-      `e2e-subnet-${runId}-e`,
+      `e2e-subnet-${runId}`,
       '--dht-bootstrap',
       dhtBootstrap,
       '--msb',
@@ -775,6 +765,8 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
       `ws://127.0.0.1:${alicePort}`,
       '--token',
       aliceTokenWs,
+      '--peer-keypair',
+      aliceKeys.keyPairPath,
       '--rfq-channel',
       rfqChannel,
       '--once',
@@ -812,6 +804,8 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
       `ws://127.0.0.1:${bobPort}`,
       '--token',
       bobTokenWs,
+      '--peer-keypair',
+      bobKeys.keyPairPath,
       '--rfq-channel',
       rfqChannel,
       '--trade-id',

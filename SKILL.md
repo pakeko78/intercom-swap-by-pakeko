@@ -84,7 +84,7 @@ To keep operation non-fuzzy and cross-platform, any agent guidance MUST be deliv
 This repo includes `scripts/swapctl.mjs` (with wrappers `scripts/swapctl.sh` and `scripts/swapctl.ps1`) to deterministically:
 - open/join/send sidechannels over SC-Bridge
   - includes `leave` to drop ephemeral channels from long-running peers
-- create owner-signed welcomes + invites (via SC-Bridge signing)
+- create owner-signed welcomes + invites (signed locally via `--peer-keypair`)
 - send signed swap messages with schema validation
   - RFQ negotiation: `rfq`, `quote`, `quote-accept`, `swap-invite-from-accept`, `join-from-swap-invite`
   - Presence: `svc-announce`, `svc-announce-loop` (signed service/offers announcements for rendezvous)
@@ -157,6 +157,7 @@ To avoid copy/pasting SC-Bridge URLs/tokens for the bots, use:
 - `scripts/rfq-taker-peer.sh`, `scripts/rfq-taker-peer.ps1`
 
 These wrappers also set `--receipts-db onchain/receipts/<store>.sqlite` by default (local-only; gitignored) so swaps have a recovery path.
+They also pass `--peer-keypair stores/<store>/db/keypair.json` so bots can sign swap envelopes locally.
 
 For tool-call friendly lifecycle control (start/stop/restart specific bot instances without stopping the peer), use:
 - `scripts/rfqbotmgr.mjs` (wrappers: `scripts/rfqbotmgr.sh`, `scripts/rfqbotmgr.ps1`)
@@ -190,6 +191,7 @@ Edit `onchain/prompt/setup.json`:
 - `llm.base_url`: your OpenAI-compatible REST API base (must end with `/v1` for most servers)
 - `llm.model`: model id to use
 - `llm.api_key`: optional (use `""` if not required)
+- `peer.keypair`: path to the peer wallet keypair file (usually `stores/<store>/db/keypair.json`) so tools can sign sidechannel envelopes locally
 - `sc_bridge.token` or `sc_bridge.token_file`: SC‑Bridge auth
 - optional: `receipts.db`, `ln.*`, `solana.*` (only needed for tools that touch those subsystems)
 
@@ -401,7 +403,7 @@ Core:
 - `--peer-store-name <name>` : local peer state label.
 - **Do not run the same store twice:** a given `--peer-store-name` must only be run by **one** `pear run . ...` process at a time. Running two peers against the same store can corrupt local state and cause nondeterministic behavior.
 - `--msb-store-name <name>` : local MSB state label.
-- `--subnet-channel <name>` : subnet/app identity.
+- `--subnet-channel <name>` : subnet/app identity. Keep it consistent across peers you want to communicate with (mismatches can prevent connections).
 - `--subnet-bootstrap <hex>` : admin **Peer Writer** key for joiners.
 - `--msb 0|1` (or `--enable-msb 0|1`) : enable/disable MSB networking (**default: 1**). Use `0` for sidechannel-only mode and unattended e2e tests.
 - `--dht-bootstrap "<node1,node2>"` : override HyperDHT bootstrap nodes used by Hyperswarm (comma-separated).

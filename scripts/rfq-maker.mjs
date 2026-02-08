@@ -12,13 +12,13 @@ import {
 
 import { SolanaRpcPool } from '../src/solana/rpcPool.js';
 import { ScBridgeClient } from '../src/sc-bridge/client.js';
-import { createUnsignedEnvelope, attachSignature } from '../src/protocol/signedMessage.js';
+import { createUnsignedEnvelope, attachSignature, signUnsignedEnvelopeHex } from '../src/protocol/signedMessage.js';
 import { KIND, ASSET, PAIR, STATE } from '../src/swap/constants.js';
 import { PAIR as PRICE_PAIR } from '../src/price/providers.js';
 import { validateSwapEnvelope } from '../src/swap/schema.js';
 import { hashUnsignedEnvelope } from '../src/swap/hash.js';
 import { createInitialTrade, applySwapEnvelope } from '../src/swap/stateMachine.js';
-import { normalizeInvitePayload, normalizeWelcomePayload, createSignedInvite } from '../src/sidechannel/capabilities.js';
+import { createSignedWelcome, createSignedInvite, signPayloadHex } from '../src/sidechannel/capabilities.js';
 import { normalizeClnNetwork } from '../src/ln/cln.js';
 import { normalizeLndNetwork } from '../src/ln/lnd.js';
 import { decodeBolt11 } from '../src/ln/bolt11.js';
@@ -31,6 +31,7 @@ import {
 } from '../src/solana/lnUsdtEscrowClient.js';
 import { readSolanaKeypair } from '../src/solana/keypair.js';
 import { openTradeReceiptsStore } from '../src/receipts/store.js';
+import { loadPeerWalletFromFile } from '../src/peer/keypair.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -101,18 +102,9 @@ function ensureOk(res, label) {
   return res;
 }
 
-async function signViaBridge(sc, payload) {
-  const res = await sc.sign(payload);
-  if (res.type !== 'signed') throw new Error(`Unexpected sign response: ${JSON.stringify(res).slice(0, 120)}`);
-  const signerHex = String(res.signer || '').trim().toLowerCase();
-  const sigHex = String(res.sig || '').trim().toLowerCase();
-  if (!signerHex || !sigHex) throw new Error('Signing failed (missing signer/sig)');
-  return { signerHex, sigHex };
-}
-
-async function signSwapEnvelope(sc, unsignedEnvelope) {
-  const { signerHex, sigHex } = await signViaBridge(sc, unsignedEnvelope);
-  const signed = attachSignature(unsignedEnvelope, { signerPubKeyHex: signerHex, sigHex });
+function signSwapEnvelope(unsignedEnvelope, { pubHex, secHex }) {
+  const sigHex = signUnsignedEnvelopeHex(unsignedEnvelope, secHex);
+  const signed = attachSignature(unsignedEnvelope, { signerPubKeyHex: pubHex, sigHex });
   const v = validateSwapEnvelope(signed);
   if (!v.ok) throw new Error(`Internal error: signed envelope invalid: ${v.error}`);
   return signed;
@@ -161,6 +153,7 @@ async function main() {
 
   const url = requireFlag(flags, 'url');
   const token = requireFlag(flags, 'token');
+  const peerKeypairPath = requireFlag(flags, 'peer-keypair');
   const rfqChannel = (flags.get('rfq-channel') && String(flags.get('rfq-channel')).trim()) || '0000intercomswapbtcusdt';
   const swapChannelTemplate =
     (flags.get('swap-channel-template') && String(flags.get('swap-channel-template')).trim()) || 'swap:{trade_id}';
@@ -257,6 +250,10 @@ async function main() {
 
   const makerPubkey = String(sc.hello?.peer || '').trim().toLowerCase();
   if (!makerPubkey) die('SC-Bridge hello missing peer pubkey');
+  const signing = await loadPeerWalletFromFile(peerKeypairPath);
+  if (signing.pubHex !== makerPubkey) {
+    die(`peer keypair pubkey mismatch: sc_bridge=${makerPubkey} keypair=${signing.pubHex}`);
+  }
 
   const quotes = new Map(); // quote_id -> { rfq_id, trade_id, btc_sats, usdt_amount, sol_recipient, sol_mint }
   const swaps = new Map(); // swap_channel -> ctx
@@ -342,7 +339,7 @@ async function main() {
         tradeId: ctx.tradeId,
         body: { reason: String(reason || 'canceled') },
       });
-      const cancelSigned = await signSwapEnvelope(sc, cancelUnsigned);
+      const cancelSigned = signSwapEnvelope(cancelUnsigned, signing);
       await sc.send(ctx.swapChannel, cancelSigned);
     } catch (_e) {}
   };
@@ -423,7 +420,7 @@ async function main() {
         terms_valid_until_unix: nowSec + termsValidSec,
       },
     });
-    const signed = await signSwapEnvelope(sc, termsUnsigned);
+    const signed = signSwapEnvelope(termsUnsigned, signing);
     const applied = applySwapEnvelope(ctx.trade, signed);
     if (!applied.ok) throw new Error(applied.error);
     ctx.trade = applied.trade;
@@ -495,7 +492,7 @@ async function main() {
         expires_at_unix: decoded.expires_at_unix,
       },
     });
-    const lnInvSigned = await signSwapEnvelope(sc, lnInvUnsigned);
+    const lnInvSigned = signSwapEnvelope(lnInvUnsigned, signing);
     {
       const r = applySwapEnvelope(ctx.trade, lnInvSigned);
       if (!r.ok) throw new Error(r.error);
@@ -566,7 +563,7 @@ async function main() {
         tx_sig: escrowSig,
       },
     });
-    const solEscrowSigned = await signSwapEnvelope(sc, solEscrowUnsigned);
+    const solEscrowSigned = signSwapEnvelope(solEscrowUnsigned, signing);
     {
       const r = applySwapEnvelope(ctx.trade, solEscrowSigned);
       if (!r.ok) throw new Error(r.error);
@@ -736,7 +733,7 @@ async function main() {
           },
         });
         const quoteId = hashUnsignedEnvelope(quoteUnsigned);
-        const signed = await signSwapEnvelope(sc, quoteUnsigned);
+        const signed = signSwapEnvelope(quoteUnsigned, signing);
         const sent = ensureOk(await sc.send(rfqChannel, signed), 'send quote');
         if (debug) process.stderr.write(`[maker] quoted trade_id=${msg.trade_id} rfq_id=${rfqId} quote_id=${quoteId} sent=${sent.type}\n`);
         quotes.set(quoteId, {
@@ -777,30 +774,25 @@ async function main() {
           // missed the first invite.
         }
 
-        // Build welcome + invite signed by this peer (SC-Bridge signing).
-        const welcomePayload = normalizeWelcomePayload({
-          channel: swapChannel,
-          ownerPubKey: makerPubkey,
-          text: `swap ${tradeId}`,
-          issuedAt: Date.now(),
-          version: 1,
-        });
-        const { sigHex: welcomeSig } = await signViaBridge(sc, welcomePayload);
-        const welcome = { payload: welcomePayload, sig: welcomeSig };
-
+        // Build welcome + invite signed by this peer (local keypair signing).
         const issuedAt = Date.now();
-        const invitePayload = normalizeInvitePayload({
-          channel: swapChannel,
-          inviteePubKey,
-          inviterPubKey: makerPubkey,
-          inviterAddress: null,
-          issuedAt,
-          expiresAt: issuedAt + inviteTtlSec * 1000,
-          nonce: Math.random().toString(36).slice(2, 10),
-          version: 1,
-        });
-        const { sigHex: inviteSig } = await signViaBridge(sc, invitePayload);
-        const invite = createSignedInvite(invitePayload, () => inviteSig, { welcome });
+        const welcome = createSignedWelcome(
+          { channel: swapChannel, ownerPubKey: makerPubkey, text: `swap ${tradeId}`, issuedAt, version: 1 },
+          (payload) => signPayloadHex(payload, signing.secHex)
+        );
+        const invite = createSignedInvite(
+          {
+            channel: swapChannel,
+            inviteePubKey,
+            inviterPubKey: makerPubkey,
+            inviterAddress: null,
+            issuedAt,
+            ttlMs: inviteTtlSec * 1000,
+            version: 1,
+          },
+          (payload) => signPayloadHex(payload, signing.secHex),
+          { welcome }
+        );
 
         const swapInviteUnsigned = createUnsignedEnvelope({
           v: 1,
@@ -815,7 +807,7 @@ async function main() {
             welcome,
           },
         });
-        const swapInviteSigned = await signSwapEnvelope(sc, swapInviteUnsigned);
+        const swapInviteSigned = signSwapEnvelope(swapInviteUnsigned, signing);
         ensureOk(await sc.send(rfqChannel, swapInviteSigned), 'send swap_invite');
         // If this was a retry for an existing swap, just re-send the invite and return.
         if (existing) return;

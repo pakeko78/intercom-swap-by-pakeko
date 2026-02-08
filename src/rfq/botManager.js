@@ -72,10 +72,17 @@ function buildBotArgs({ repoRoot, role, store, scPort, receiptsDb, argv }) {
   const token = fs.readFileSync(tokenFile, 'utf8').trim();
   if (!token) throw new Error(`Empty SC-Bridge token: ${tokenFile}`);
 
+  const peerKeypair = path.join(repoRoot, 'stores', store, 'db', 'keypair.json');
+  if (!fs.existsSync(peerKeypair)) {
+    throw new Error(
+      `Missing peer keypair file: ${peerKeypair}\nHint: start the peer once (storeName=${store}) so it creates the keypair.`
+    );
+  }
+
   const url = `ws://127.0.0.1:${scPort}`;
   const script = role === 'maker' ? 'scripts/rfq-maker.mjs' : 'scripts/rfq-taker.mjs';
 
-  const args = [script, '--url', url, '--token', token];
+  const args = [script, '--url', url, '--token', token, '--peer-keypair', peerKeypair];
   if (receiptsDb) args.push('--receipts-db', receiptsDb);
   for (const a of argv || []) args.push(a);
   return args;
@@ -224,4 +231,3 @@ export function rfqbotStatus({ repoRoot = process.cwd(), name = '' } = {}) {
   }
   return { type: 'bot_status', bots: rows };
 }
-

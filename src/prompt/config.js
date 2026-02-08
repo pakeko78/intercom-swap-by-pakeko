@@ -64,16 +64,17 @@ export const DEFAULT_PROMPT_SETUP_PATH = 'onchain/prompt/setup.json';
 
 // Loads the local promptd setup. The setup file MUST be gitignored (recommended under onchain/).
 //
-// Expected JSON structure (high-level):
-// {
-//   "llm": { "base_url": "...", "api_key": "...", "model": "...", ... },
-//   "server": { "host": "127.0.0.1", "port": 9333, "audit_dir": "onchain/prompt/audit", "auto_approve_default": false },
-//   "sc_bridge": { "url": "ws://127.0.0.1:49222", "token": "...", "token_file": "onchain/sc-bridge/peer.token" },
-//   "receipts": { "db": "onchain/receipts/maker.sqlite" },
-//   "ln": { ... },
-//   "solana": { ... }
-// }
-export function loadPromptSetupFromFile({ configPath = DEFAULT_PROMPT_SETUP_PATH, cwd = process.cwd() } = {}) {
+  // Expected JSON structure (high-level):
+  // {
+  //   "peer": { "keypair": "stores/<store>/db/keypair.json" },
+  //   "llm": { "base_url": "...", "api_key": "...", "model": "...", ... },
+  //   "server": { "host": "127.0.0.1", "port": 9333, "audit_dir": "onchain/prompt/audit", "auto_approve_default": false },
+  //   "sc_bridge": { "url": "ws://127.0.0.1:49222", "token": "...", "token_file": "onchain/sc-bridge/peer.token" },
+  //   "receipts": { "db": "onchain/receipts/maker.sqlite" },
+  //   "ln": { ... },
+  //   "solana": { ... }
+  // }
+  export function loadPromptSetupFromFile({ configPath = DEFAULT_PROMPT_SETUP_PATH, cwd = process.cwd() } = {}) {
   const baseDir = path.resolve(cwd);
   const resolved = resolvePath(baseDir, configPath);
   const raw = readJsonFile(resolved);
@@ -82,6 +83,11 @@ export function loadPromptSetupFromFile({ configPath = DEFAULT_PROMPT_SETUP_PATH
   const agentRaw = isObject(raw.agent) ? raw.agent : {};
   const agent = {
     role: normalizeString(agentRaw.role, { allowEmpty: true }) || '',
+  };
+
+  const peerRaw = isObject(raw.peer) ? raw.peer : {};
+  const peer = {
+    keypairPath: resolvePath(baseDir, peerRaw.keypair || ''),
   };
 
   const llmRaw = isObject(raw.llm) ? raw.llm : {};
@@ -160,6 +166,7 @@ export function loadPromptSetupFromFile({ configPath = DEFAULT_PROMPT_SETUP_PATH
   return {
     configPath: resolved,
     agent,
+    peer,
     llm,
     server,
     scBridge,

@@ -23,8 +23,16 @@ fi
 
 SC_TOKEN="$(tr -d '\r\n' <"$TOKEN_FILE")"
 
+KEYPAIR_FILE="stores/${STORE_NAME}/db/keypair.json"
+if [[ ! -f "$KEYPAIR_FILE" ]]; then
+  echo "Missing peer keypair file: $KEYPAIR_FILE" >&2
+  echo "Hint: this should be created by the peer on first start (storeName=${STORE_NAME})." >&2
+  exit 1
+fi
+
 exec node scripts/rfq-taker.mjs \
   --url "ws://127.0.0.1:${SC_PORT}" \
   --token "$SC_TOKEN" \
+  --peer-keypair "$KEYPAIR_FILE" \
   --receipts-db "onchain/receipts/${STORE_NAME}.sqlite" \
   "$@"

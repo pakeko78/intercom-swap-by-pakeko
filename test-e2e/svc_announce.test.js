@@ -148,7 +148,7 @@ test('e2e: svc_announce re-broadcast reaches late joiners', async (t) => {
   const storesDir = path.join(repoRoot, 'stores');
   const announcerStore = `e2e-svc-announcer-${runId}`;
   const listenerStore = `e2e-svc-listener-${runId}`;
-  await writePeerKeypair({ storesDir, storeName: announcerStore });
+  const announcerKeys = await writePeerKeypair({ storesDir, storeName: announcerStore });
   await writePeerKeypair({ storesDir, storeName: listenerStore });
 
   const announcerToken = `token-announcer-${runId}`;
@@ -218,6 +218,8 @@ test('e2e: svc_announce re-broadcast reaches late joiners', async (t) => {
       `ws://127.0.0.1:${announcerPort}`,
       '--token',
       announcerToken,
+      '--peer-keypair',
+      announcerKeys.keyPairPath,
       'svc-announce-loop',
       '--channels',
       '0000intercom',

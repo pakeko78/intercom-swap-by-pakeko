@@ -362,7 +362,7 @@ test('e2e: promptd direct-tool mode drives full swap (LN regtest <-> Solana escr
   const makerStore = `e2e-promptd-maker-${runId}`;
   const takerStore = `e2e-promptd-taker-${runId}`;
   const makerKeys = await writePeerKeypair({ storesDir, storeName: makerStore });
-  await writePeerKeypair({ storesDir, storeName: takerStore });
+  const takerKeys = await writePeerKeypair({ storesDir, storeName: takerStore });
 
   const signMakerHex = (payload) => signPayloadHex(payload, makerKeys.secHex);
   // Welcome is required by default for non-entry channels.
@@ -474,6 +474,7 @@ test('e2e: promptd direct-tool mode drives full swap (LN regtest <-> Solana escr
     JSON.stringify(
       {
         agent: { role: 'maker' },
+        peer: { keypair: makerKeys.keyPairPath },
         llm: { base_url: 'http://127.0.0.1:1/v1', api_key: '', model: 'dummy', response_format: { type: 'json_object' } },
         server: { host: '127.0.0.1', port: makerPromptdPort, audit_dir: `onchain/prompt/audit-e2e-${runId}-maker`, auto_approve_default: false, max_steps: 12, max_repairs: 0 },
         sc_bridge: { url: `ws://127.0.0.1:${makerScPort}`, token: makerTokenWs },
@@ -490,6 +491,7 @@ test('e2e: promptd direct-tool mode drives full swap (LN regtest <-> Solana escr
     JSON.stringify(
       {
         agent: { role: 'taker' },
+        peer: { keypair: takerKeys.keyPairPath },
         llm: { base_url: 'http://127.0.0.1:1/v1', api_key: '', model: 'dummy', response_format: { type: 'json_object' } },
         server: { host: '127.0.0.1', port: takerPromptdPort, audit_dir: `onchain/prompt/audit-e2e-${runId}-taker`, auto_approve_default: false, max_steps: 12, max_repairs: 0 },
         sc_bridge: { url: `ws://127.0.0.1:${takerScPort}`, token: takerTokenWs },

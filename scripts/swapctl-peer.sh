@@ -25,5 +25,9 @@ fi
 
 SC_TOKEN="$(tr -d '\r\n' <"$TOKEN_FILE")"
 
-exec node scripts/swapctl.mjs --url "ws://127.0.0.1:${SC_PORT}" --token "$SC_TOKEN" "$@"
+KEYPAIR_FILE="stores/${STORE_NAME}/db/keypair.json"
+if [[ -f "$KEYPAIR_FILE" ]]; then
+  exec node scripts/swapctl.mjs --url "ws://127.0.0.1:${SC_PORT}" --token "$SC_TOKEN" --peer-keypair "$KEYPAIR_FILE" "$@"
+fi
 
+exec node scripts/swapctl.mjs --url "ws://127.0.0.1:${SC_PORT}" --token "$SC_TOKEN" "$@"

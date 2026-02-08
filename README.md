@@ -170,12 +170,13 @@ Notes:
 |---|---|
 | Token files | Created under `onchain/sc-bridge/<storeName>.token` (gitignored). |
 | RFQ channel | Any channel works. Use a dedicated rendezvous like `0000intercomswapbtcusdt` for trading, and keep `0000intercom` for service presence only. |
+| Subnet channel | Keep `--subnet-channel` consistent across peers (mismatches can prevent connections). |
 
 ---
 
 ### SC-Bridge Control (`swapctl`)
 
-`swapctl` is the SC-Bridge client CLI. It controls a **running peer** over WebSocket, and (when needed) asks the peer to sign via SC-Bridge.
+`swapctl` is the SC-Bridge client CLI. It controls a **running peer** over WebSocket, and (when needed) signs locally using the peer keypair file (SC-Bridge never signs).
 
 #### Connection
 
@@ -183,6 +184,7 @@ Notes:
 |---|---:|---|
 | `--url ws://127.0.0.1:<scPort>` | yes | SC-Bridge websocket URL |
 | `--token <hex>` | yes | SC-Bridge token (from `onchain/sc-bridge/<store>.token`) |
+| `--peer-keypair <path>` | signing only | Peer `keypair.json` (usually `stores/<store>/db/keypair.json`) for commands that create signed payloads |
 
 #### Token Convenience Wrapper (Recommended)
 
@@ -588,6 +590,7 @@ Edit `onchain/prompt/setup.json`:
 - `llm.base_url`: your OpenAI-compatible REST API base (typically ends with `/v1`)
 - `llm.model`: model id to use
 - `llm.api_key`: optional (use `""` if not required)
+- `peer.keypair`: path to the peer wallet keypair file (usually `stores/<store>/db/keypair.json`) so tools can sign sidechannel envelopes locally
 - optional sampling params: `max_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`
 - `sc_bridge.token` or `sc_bridge.token_file`
 - `receipts.db` (optional, for `intercomswap_receipts_*` tools)

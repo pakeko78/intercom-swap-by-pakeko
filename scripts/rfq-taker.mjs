@@ -14,7 +14,7 @@ import {
 } from '@solana/spl-token';
 
 import { ScBridgeClient } from '../src/sc-bridge/client.js';
-import { createUnsignedEnvelope, attachSignature } from '../src/protocol/signedMessage.js';
+import { createUnsignedEnvelope, attachSignature, signUnsignedEnvelopeHex } from '../src/protocol/signedMessage.js';
 import { KIND, ASSET, PAIR, STATE } from '../src/swap/constants.js';
 import { PAIR as PRICE_PAIR } from '../src/price/providers.js';
 import { validateSwapEnvelope } from '../src/swap/schema.js';
@@ -28,6 +28,7 @@ import { claimEscrowTx, LN_USDT_ESCROW_PROGRAM_ID } from '../src/solana/lnUsdtEs
 import { readSolanaKeypair } from '../src/solana/keypair.js';
 import { SolanaRpcPool } from '../src/solana/rpcPool.js';
 import { openTradeReceiptsStore } from '../src/receipts/store.js';
+import { loadPeerWalletFromFile } from '../src/peer/keypair.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -98,18 +99,9 @@ function ensureOk(res, label) {
   return res;
 }
 
-async function signViaBridge(sc, payload) {
-  const res = await sc.sign(payload);
-  if (res.type !== 'signed') throw new Error(`Unexpected sign response: ${JSON.stringify(res).slice(0, 120)}`);
-  const signerHex = String(res.signer || '').trim().toLowerCase();
-  const sigHex = String(res.sig || '').trim().toLowerCase();
-  if (!signerHex || !sigHex) throw new Error('Signing failed (missing signer/sig)');
-  return { signerHex, sigHex };
-}
-
-async function signSwapEnvelope(sc, unsignedEnvelope) {
-  const { signerHex, sigHex } = await signViaBridge(sc, unsignedEnvelope);
-  const signed = attachSignature(unsignedEnvelope, { signerPubKeyHex: signerHex, sigHex });
+function signSwapEnvelope(unsignedEnvelope, { pubHex, secHex }) {
+  const sigHex = signUnsignedEnvelopeHex(unsignedEnvelope, secHex);
+  const signed = attachSignature(unsignedEnvelope, { signerPubKeyHex: pubHex, sigHex });
   const v = validateSwapEnvelope(signed);
   if (!v.ok) throw new Error(`Internal error: signed envelope invalid: ${v.error}`);
   return signed;
@@ -153,6 +145,7 @@ async function main() {
 
   const url = requireFlag(flags, 'url');
   const token = requireFlag(flags, 'token');
+  const peerKeypairPath = requireFlag(flags, 'peer-keypair');
   const rfqChannel = (flags.get('rfq-channel') && String(flags.get('rfq-channel')).trim()) || '0000intercomswapbtcusdt';
   const receiptsDbPath = flags.get('receipts-db') ? String(flags.get('receipts-db')).trim() : '';
   const persistPreimage = parseBool(flags.get('persist-preimage'), receiptsDbPath ? true : false);
@@ -252,6 +245,10 @@ async function main() {
 
   const takerPubkey = String(sc.hello?.peer || '').trim().toLowerCase();
   if (!takerPubkey) die('SC-Bridge hello missing peer pubkey');
+  const signing = await loadPeerWalletFromFile(peerKeypairPath);
+  if (signing.pubHex !== takerPubkey) {
+    die(`peer keypair pubkey mismatch: sc_bridge=${takerPubkey} keypair=${signing.pubHex}`);
+  }
 
   const fetchBtcUsdtMedian = async () => {
     const res = await sc.priceGet();
@@ -317,7 +314,7 @@ async function main() {
     },
   });
   const rfqId = hashUnsignedEnvelope(rfqUnsigned);
-  const rfqSigned = await signSwapEnvelope(sc, rfqUnsigned);
+  const rfqSigned = signSwapEnvelope(rfqUnsigned, signing);
   ensureOk(await sc.send(rfqChannel, rfqSigned), 'send rfq');
 
   persistTrade(
@@ -467,15 +464,15 @@ async function main() {
     };
 
     // Send ready status with invite attached to accelerate authorization.
-    const readyUnsigned = createUnsignedEnvelope({
-      v: 1,
-      kind: KIND.STATUS,
-      tradeId,
-      body: { state: STATE.INIT, note: 'ready' },
-    });
-    const readySigned = await signSwapEnvelope(sc, readyUnsigned);
-    swapCtx.sent.ready = readySigned;
-    await sc.send(swapChannel, readySigned, { invite });
+  const readyUnsigned = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.STATUS,
+    tradeId,
+    body: { state: STATE.INIT, note: 'ready' },
+  });
+  const readySigned = signSwapEnvelope(readyUnsigned, signing);
+  swapCtx.sent.ready = readySigned;
+  await sc.send(swapChannel, readySigned, { invite });
     process.stdout.write(`${JSON.stringify({ type: 'swap_ready_sent', trade_id: tradeId, swap_channel: swapChannel })}\n`);
     persistTrade({ state: swapCtx.trade.state }, 'swap_ready_sent', readySigned);
 
@@ -579,18 +576,18 @@ async function main() {
     }
 
     const termsHash = hashUnsignedEnvelope(stripSignature(termsMsg));
-    const acceptUnsigned = createUnsignedEnvelope({
-      v: 1,
-      kind: KIND.ACCEPT,
-      tradeId,
-      body: { terms_hash: termsHash },
-    });
-    const acceptSigned = await signSwapEnvelope(sc, acceptUnsigned);
-    {
-      const r = applySwapEnvelope(swapCtx.trade, acceptSigned);
-      if (!r.ok) throw new Error(r.error);
-      swapCtx.trade = r.trade;
-    }
+  const acceptUnsigned = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.ACCEPT,
+    tradeId,
+    body: { terms_hash: termsHash },
+  });
+  const acceptSigned = signSwapEnvelope(acceptUnsigned, signing);
+  {
+    const r = applySwapEnvelope(swapCtx.trade, acceptSigned);
+    if (!r.ok) throw new Error(r.error);
+    swapCtx.trade = r.trade;
+  }
     swapCtx.sent.accept = acceptSigned;
     await sc.send(swapChannel, acceptSigned);
     process.stdout.write(`${JSON.stringify({ type: 'accept_sent', trade_id: tradeId, swap_channel: swapChannel })}\n`);
@@ -716,18 +713,18 @@ async function main() {
 
     const paymentHashHex = String(swapCtx.trade.invoice.payment_hash_hex || '').trim().toLowerCase();
 
-    const lnPaidUnsigned = createUnsignedEnvelope({
-      v: 1,
-      kind: KIND.LN_PAID,
-      tradeId,
-      body: { payment_hash_hex: paymentHashHex },
-    });
-    const lnPaidSigned = await signSwapEnvelope(sc, lnPaidUnsigned);
-    {
-      const r = applySwapEnvelope(swapCtx.trade, lnPaidSigned);
-      if (!r.ok) throw new Error(r.error);
-      swapCtx.trade = r.trade;
-    }
+  const lnPaidUnsigned = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.LN_PAID,
+    tradeId,
+    body: { payment_hash_hex: paymentHashHex },
+  });
+  const lnPaidSigned = signSwapEnvelope(lnPaidUnsigned, signing);
+  {
+    const r = applySwapEnvelope(swapCtx.trade, lnPaidSigned);
+    if (!r.ok) throw new Error(r.error);
+    swapCtx.trade = r.trade;
+  }
     swapCtx.sent.ln_paid = lnPaidSigned;
     await sc.send(swapChannel, lnPaidSigned);
     process.stdout.write(`${JSON.stringify({ type: 'ln_paid_sent', trade_id: tradeId, swap_channel: swapChannel })}\n`);
@@ -789,19 +786,19 @@ async function main() {
     );
     const claimSig = await sol.pool.call((connection) => sendAndConfirm(connection, claimTx), { label: 'taker:send-claim-tx' });
 
-    const solClaimedUnsigned = createUnsignedEnvelope({
-      v: 1,
-      kind: KIND.SOL_CLAIMED,
-      tradeId,
-      body: {
-        payment_hash_hex: paymentHashHex,
-        escrow_pda: swapCtx.trade.escrow.escrow_pda,
-        tx_sig: claimSig,
-      },
-    });
-    const solClaimedSigned = await signSwapEnvelope(sc, solClaimedUnsigned);
-    swapCtx.sent.sol_claimed = solClaimedSigned;
-    await sc.send(swapChannel, solClaimedSigned);
+  const solClaimedUnsigned = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.SOL_CLAIMED,
+    tradeId,
+    body: {
+      payment_hash_hex: paymentHashHex,
+      escrow_pda: swapCtx.trade.escrow.escrow_pda,
+      tx_sig: claimSig,
+    },
+  });
+  const solClaimedSigned = signSwapEnvelope(solClaimedUnsigned, signing);
+  swapCtx.sent.sol_claimed = solClaimedSigned;
+  await sc.send(swapChannel, solClaimedSigned);
     process.stdout.write(`${JSON.stringify({ type: 'sol_claimed_sent', trade_id: tradeId, swap_channel: swapChannel, tx_sig: claimSig })}\n`);
     persistTrade({ state: swapCtx.trade.state }, 'sol_claimed', solClaimedSigned);
 
@@ -900,7 +897,7 @@ async function main() {
               quote_id: quoteId,
             },
           });
-          quoteAcceptSigned = await signSwapEnvelope(sc, quoteAcceptUnsigned);
+          quoteAcceptSigned = signSwapEnvelope(quoteAcceptUnsigned, signing);
           ensureOk(await sc.send(rfqChannel, quoteAcceptSigned), 'send quote_accept');
           if (debug) process.stderr.write(`[taker] accepted quote trade_id=${tradeId} quote_id=${quoteId}\n`);
           process.stdout.write(`${JSON.stringify({ type: 'quote_accepted', trade_id: tradeId, rfq_id: rfqId, quote_id: quoteId })}\n`);

@@ -22,6 +22,22 @@ export function encodeEnvelopeForSigning(unsignedEnvelope) {
   return stableStringify(unsignedEnvelope);
 }
 
+export function signUnsignedEnvelopeHex(unsignedEnvelope, secretKeyHexOrBuf) {
+  const message = encodeEnvelopeForSigning(unsignedEnvelope);
+  let msgBuf;
+  let secretBuf;
+  try {
+    msgBuf = b4a.from(message, 'utf8');
+    secretBuf = b4a.isBuffer(secretKeyHexOrBuf)
+      ? secretKeyHexOrBuf
+      : b4a.from(String(secretKeyHexOrBuf || '').trim().toLowerCase(), 'hex');
+  } catch (_e) {
+    throw new Error('Invalid signing material');
+  }
+  const sigBuf = PeerWallet.sign(msgBuf, secretBuf);
+  return b4a.toString(sigBuf, 'hex');
+}
+
 export function attachSignature(unsignedEnvelope, { signerPubKeyHex, sigHex }) {
   if (!signerPubKeyHex || typeof signerPubKeyHex !== 'string') throw new Error('signerPubKeyHex is required');
   if (!sigHex || typeof sigHex !== 'string') throw new Error('sigHex is required');
@@ -51,4 +67,3 @@ export function verifySignedEnvelope(envelope) {
   const ok = PeerWallet.verify(sigBuf, msgBuf, pubBuf);
   return ok ? { ok: true, error: null } : { ok: false, error: 'Invalid signature' };
 }
-

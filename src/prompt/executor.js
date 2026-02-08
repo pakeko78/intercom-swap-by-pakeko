@@ -13,17 +13,18 @@ import {
 } from '@solana/spl-token';
 
 import { ScBridgeClient } from '../sc-bridge/client.js';
-import { createUnsignedEnvelope, attachSignature, verifySignedEnvelope } from '../protocol/signedMessage.js';
+import { createUnsignedEnvelope, attachSignature, signUnsignedEnvelopeHex, verifySignedEnvelope } from '../protocol/signedMessage.js';
 import { validateSwapEnvelope } from '../swap/schema.js';
 import { ASSET, KIND, PAIR } from '../swap/constants.js';
 import { hashUnsignedEnvelope, sha256Hex } from '../swap/hash.js';
 import { hashTermsEnvelope } from '../swap/terms.js';
 import { verifySwapPrePayOnchain } from '../swap/verify.js';
 import {
+  createSignedWelcome,
   createSignedInvite,
-  normalizeInvitePayload,
-  normalizeWelcomePayload,
+  signPayloadHex,
 } from '../sidechannel/capabilities.js';
+import { loadPeerWalletFromFile } from '../peer/keypair.js';
 
 import {
   lnConnect,
@@ -212,18 +213,9 @@ async function withScBridge({ url, token }, fn) {
   }
 }
 
-async function signViaBridge(sc, payload) {
-  const res = await sc.sign(payload);
-  if (res.type !== 'signed') throw new Error(`Unexpected sign response: ${safeJsonStringify(res).slice(0, 200)}`);
-  const signerHex = String(res.signer || '').trim().toLowerCase();
-  const sigHex = String(res.sig || '').trim().toLowerCase();
-  if (!signerHex || !sigHex) throw new Error('Signing failed (missing signer/sig)');
-  return { signerHex, sigHex };
-}
-
-async function signSwapEnvelope(sc, unsignedEnvelope) {
-  const { signerHex, sigHex } = await signViaBridge(sc, unsignedEnvelope);
-  const signed = attachSignature(unsignedEnvelope, { signerPubKeyHex: signerHex, sigHex });
+function signSwapEnvelope(unsignedEnvelope, { pubHex, secHex }) {
+  const sigHex = signUnsignedEnvelopeHex(unsignedEnvelope, secHex);
+  const signed = attachSignature(unsignedEnvelope, { signerPubKeyHex: pubHex, sigHex });
   const v = validateSwapEnvelope(signed);
   if (!v.ok) throw new Error(`Signed envelope invalid: ${v.error}`);
   return signed;
@@ -317,11 +309,13 @@ function resolveOnchainPath(p, { label = 'path', allowDir = false } = {}) {
 export class ToolExecutor {
   constructor({
     scBridge,
+    peer,
     ln,
     solana,
     receipts,
   }) {
     this.scBridge = scBridge; // { url, token }
+    this.peer = peer; // { keypairPath }
     this.ln = ln; // config object passed to src/ln/client.js
     this.solana = solana; // { rpcUrls, commitment, programId, keypairPath, computeUnitLimit, computeUnitPriceMicroLamports }
     this.receipts = receipts; // { dbPath }
@@ -334,6 +328,7 @@ export class ToolExecutor {
     this._scQueue = [];
     this._scQueueMax = 500;
 
+    this._peerSigning = null; // { pubHex, secHex }
     this._solanaKeypair = null;
     this._solanaPool = null;
   }
@@ -368,6 +363,22 @@ export class ToolExecutor {
     if (!p) throw new Error('Solana signer not configured (set solana.keypair in prompt setup JSON)');
     this._solanaKeypair = readSolanaKeypair(p);
     return this._solanaKeypair;
+  }
+
+  async _requirePeerSigning() {
+    if (this._peerSigning) return this._peerSigning;
+    const p = String(this.peer?.keypairPath || '').trim();
+    if (!p) {
+      throw new Error('Peer signing not configured (set peer.keypair in prompt setup JSON)');
+    }
+    const { pubHex, secHex } = await loadPeerWalletFromFile(p);
+    const sc = await this._scEnsurePersistent({ timeoutMs: 10_000 });
+    const peerHex = String(sc?.hello?.peer || '').trim().toLowerCase();
+    if (peerHex && peerHex !== pubHex) {
+      throw new Error(`peer keypair pubkey mismatch vs sc-bridge peer (${peerHex} != ${pubHex})`);
+    }
+    this._peerSigning = { pubHex, secHex };
+    return this._peerSigning;
   }
 
   async _openReceiptsStore({ required = false } = {}) {
@@ -665,8 +676,9 @@ export class ToolExecutor {
 
       if (dryRun) return { type: 'dry_run', tool: toolName, channel, rfq_id: rfqId, unsigned };
 
+      const signing = await this._requirePeerSigning();
       return withScBridge(this.scBridge, async (sc) => {
-        const signed = await signSwapEnvelope(sc, unsigned);
+        const signed = signSwapEnvelope(unsigned, signing);
         await sendEnvelope(sc, channel, signed);
         return { type: 'rfq_posted', channel, rfq_id: rfqId, envelope: signed };
       });
@@ -711,8 +723,9 @@ export class ToolExecutor {
       });
       const quoteId = hashUnsignedEnvelope(unsigned);
       if (dryRun) return { type: 'dry_run', tool: toolName, channel, quote_id: quoteId, unsigned };
+      const signing = await this._requirePeerSigning();
       return withScBridge(this.scBridge, async (sc) => {
-        const signed = await signSwapEnvelope(sc, unsigned);
+        const signed = signSwapEnvelope(unsigned, signing);
         await sendEnvelope(sc, channel, signed);
         return { type: 'quote_posted', channel, quote_id: quoteId, envelope: signed };
       });
@@ -760,8 +773,9 @@ export class ToolExecutor {
       });
       const quoteId = hashUnsignedEnvelope(unsigned);
       if (dryRun) return { type: 'dry_run', tool: toolName, channel, quote_id: quoteId, unsigned };
+      const signing = await this._requirePeerSigning();
       return withScBridge(this.scBridge, async (sc) => {
-        const signed = await signSwapEnvelope(sc, unsigned);
+        const signed = signSwapEnvelope(unsigned, signing);
         await sendEnvelope(sc, channel, signed);
         return { type: 'quote_posted', channel, quote_id: quoteId, envelope: signed, rfq_id: rfqId };
       });
@@ -791,8 +805,9 @@ export class ToolExecutor {
       });
       if (dryRun) return { type: 'dry_run', tool: toolName, channel, unsigned };
 
+      const signing = await this._requirePeerSigning();
       return withScBridge(this.scBridge, async (sc) => {
-        const signed = await signSwapEnvelope(sc, unsigned);
+        const signed = signSwapEnvelope(unsigned, signing);
         await sendEnvelope(sc, channel, signed);
         return { type: 'quote_accept_posted', channel, envelope: signed, rfq_id: rfqId, quote_id: quoteId };
       });
@@ -824,52 +839,47 @@ export class ToolExecutor {
         return { type: 'dry_run', tool: toolName, channel, swap_channel: swapChannel, rfq_id: rfqId, quote_id: quoteId };
       }
 
-      return withScBridge(this.scBridge, async (sc) => {
-        const { signerHex: ownerPubKey } = await signViaBridge(sc, { _probe: 'swap_invite_owner' });
-        const welcomePayload = normalizeWelcomePayload({
-          channel: swapChannel,
-          ownerPubKey,
-          text: welcomeText,
-          issuedAt: Date.now(),
-          version: 1,
-        });
-        const { sigHex: welcomeSig } = await signViaBridge(sc, welcomePayload);
-        const welcome = { payload: welcomePayload, sig: welcomeSig };
-
-        const issuedAt = Date.now();
-        const ttlMs = ttlSec !== null ? ttlSec * 1000 : 7 * 24 * 3600 * 1000;
-        const invitePayload = normalizeInvitePayload({
+      const signing = await this._requirePeerSigning();
+      const ownerPubKey = signing.pubHex;
+      const issuedAt = Date.now();
+      const welcome = createSignedWelcome(
+        { channel: swapChannel, ownerPubKey, text: welcomeText, issuedAt, version: 1 },
+        (payload) => signPayloadHex(payload, signing.secHex)
+      );
+      const invite = createSignedInvite(
+        {
           channel: swapChannel,
           inviteePubKey,
           inviterPubKey: ownerPubKey,
           inviterAddress: null,
           issuedAt,
-          expiresAt: issuedAt + ttlMs,
-          nonce: Math.random().toString(36).slice(2, 10),
+          ttlMs: (ttlSec !== null ? ttlSec : 7 * 24 * 3600) * 1000,
           version: 1,
-        });
-        const { sigHex: inviteSig } = await signViaBridge(sc, invitePayload);
-        const invite = createSignedInvite(invitePayload, () => inviteSig, { welcome });
+        },
+        (payload) => signPayloadHex(payload, signing.secHex),
+        { welcome }
+      );
+      const unsigned = createUnsignedEnvelope({
+        v: 1,
+        kind: KIND.SWAP_INVITE,
+        tradeId,
+        body: {
+          rfq_id: rfqId,
+          quote_id: quoteId,
+          swap_channel: swapChannel,
+          owner_pubkey: ownerPubKey,
+          invite,
+          welcome,
+        },
+      });
+      const signed = signSwapEnvelope(unsigned, signing);
 
-        const unsigned = createUnsignedEnvelope({
-          v: 1,
-          kind: KIND.SWAP_INVITE,
-          tradeId,
-          body: {
-            rfq_id: rfqId,
-            quote_id: quoteId,
-            swap_channel: swapChannel,
-            owner_pubkey: ownerPubKey,
-            invite,
-            welcome,
-          },
-        });
-        const signed = await signSwapEnvelope(sc, unsigned);
+      return withScBridge(this.scBridge, async (sc) => {
         await sendEnvelope(sc, channel, signed);
 
-        // Ensure the maker peer has actually joined the swap channel before proceeding.
-        // (SC-Bridge send does not auto-join topics.)
-        const joinRes = await sc.join(swapChannel);
+        // Ensure the maker peer has joined and verified the dynamic welcome, otherwise it will drop
+        // inbound messages on swap:* until welcomed.
+        const joinRes = await sc.join(swapChannel, { welcome });
         if (joinRes?.type === 'error') throw new Error(joinRes.error || 'join failed');
 
         return {
@@ -1023,10 +1033,11 @@ export class ToolExecutor {
 
       if (dryRun) return { type: 'dry_run', tool: toolName, channel, unsigned };
 
+      const signing = await this._requirePeerSigning();
       const store = await this._openReceiptsStore({ required: true });
       try {
         return await withScBridge(this.scBridge, async (sc) => {
-          const signed = await signSwapEnvelope(sc, unsigned);
+          const signed = signSwapEnvelope(unsigned, signing);
           await sendEnvelope(sc, channel, signed);
 
           const programId = this._programId().toBase58();
@@ -1072,10 +1083,11 @@ export class ToolExecutor {
         body: { terms_hash: termsHash },
       });
       if (dryRun) return { type: 'dry_run', tool: toolName, channel, unsigned };
+      const signing = await this._requirePeerSigning();
       const store = await this._openReceiptsStore({ required: true });
       try {
         return await withScBridge(this.scBridge, async (sc) => {
-          const signed = await signSwapEnvelope(sc, unsigned);
+          const signed = signSwapEnvelope(unsigned, signing);
           await sendEnvelope(sc, channel, signed);
           store.upsertTrade(tradeId, {
             role: 'taker',
@@ -1114,10 +1126,11 @@ export class ToolExecutor {
         body: { terms_hash: termsHash },
       });
       if (dryRun) return { type: 'dry_run', tool: toolName, channel, trade_id: tradeId, terms_hash_hex: termsHash };
+      const signing = await this._requirePeerSigning();
       const store = await this._openReceiptsStore({ required: true });
       try {
         return await withScBridge(this.scBridge, async (sc) => {
-          const signed = await signSwapEnvelope(sc, unsigned);
+          const signed = signSwapEnvelope(unsigned, signing);
           await sendEnvelope(sc, channel, signed);
           const body = isObject(terms.body) ? terms.body : {};
           const btcSats = Number.isFinite(Number(body.btc_sats)) ? Math.trunc(Number(body.btc_sats)) : null;
@@ -1284,8 +1297,9 @@ export class ToolExecutor {
         expires_at_unix: expiresAtUnix,
       });
 
+      const signing = await this._requirePeerSigning();
       return await withScBridge(this.scBridge, async (sc) => {
-        const signed = await signSwapEnvelope(sc, unsigned);
+        const signed = signSwapEnvelope(unsigned, signing);
         await sendEnvelope(sc, channel, signed);
         store.appendEvent(tradeId, 'ln_invoice_posted', { channel, payment_hash_hex: paymentHashHex });
         const envHandle = secrets && typeof secrets.put === 'function'
@@ -1407,8 +1421,9 @@ export class ToolExecutor {
         },
       });
 
+      const signing = await this._requirePeerSigning();
       return await withScBridge(this.scBridge, async (sc) => {
-        const signed = await signSwapEnvelope(sc, unsigned);
+        const signed = signSwapEnvelope(unsigned, signing);
         await sendEnvelope(sc, channel, signed);
         store.appendEvent(tradeId, 'sol_escrow_posted', { channel, payment_hash_hex: paymentHashHex });
         const envHandle = secrets && typeof secrets.put === 'function'
@@ -1538,8 +1553,9 @@ export class ToolExecutor {
           body: { payment_hash_hex: paymentHashHex },
         });
 
+        const signing = await this._requirePeerSigning();
         return await withScBridge(this.scBridge, async (sc) => {
-          const signed = await signSwapEnvelope(sc, unsigned);
+          const signed = signSwapEnvelope(unsigned, signing);
           await sendEnvelope(sc, channel, signed);
           store.appendEvent(tradeId, 'ln_paid_posted', { channel, payment_hash_hex: paymentHashHex });
           const envHandle = secrets && typeof secrets.put === 'function'
@@ -1605,8 +1621,9 @@ export class ToolExecutor {
           body: { payment_hash_hex: paymentHashHex },
         });
 
+        const signing = await this._requirePeerSigning();
         return await withScBridge(this.scBridge, async (sc) => {
-          const signed = await signSwapEnvelope(sc, unsigned);
+          const signed = signSwapEnvelope(unsigned, signing);
           await sendEnvelope(sc, channel, signed);
           store.appendEvent(tradeId, 'ln_paid_posted', { channel, payment_hash_hex: paymentHashHex });
           const envHandle = secrets && typeof secrets.put === 'function'
@@ -1727,8 +1744,9 @@ export class ToolExecutor {
           body: { payment_hash_hex: paymentHashHex },
         });
 
+        const signing = await this._requirePeerSigning();
         return await withScBridge(this.scBridge, async (sc) => {
-          const signed = await signSwapEnvelope(sc, unsigned);
+          const signed = signSwapEnvelope(unsigned, signing);
           await sendEnvelope(sc, channel, signed);
           store.appendEvent(tradeId, 'ln_paid_posted', { channel, payment_hash_hex: paymentHashHex });
           const envHandle = secrets && typeof secrets.put === 'function'
@@ -1826,14 +1844,15 @@ export class ToolExecutor {
         },
       });
 
-      return await withScBridge(this.scBridge, async (sc) => {
-        const signed = await signSwapEnvelope(sc, unsigned);
-        await sendEnvelope(sc, channel, signed);
-        store.appendEvent(tradeId, 'sol_claimed_posted', { channel, payment_hash_hex: paymentHashHex });
-        const envHandle = secrets && typeof secrets.put === 'function'
-          ? secrets.put(signed, { key: 'sol_claimed', channel, trade_id: tradeId, payment_hash_hex: paymentHashHex })
-          : null;
-        return {
+	      const signing = await this._requirePeerSigning();
+	      return await withScBridge(this.scBridge, async (sc) => {
+	        const signed = signSwapEnvelope(unsigned, signing);
+	        await sendEnvelope(sc, channel, signed);
+	        store.appendEvent(tradeId, 'sol_claimed_posted', { channel, payment_hash_hex: paymentHashHex });
+	        const envHandle = secrets && typeof secrets.put === 'function'
+	          ? secrets.put(signed, { key: 'sol_claimed', channel, trade_id: tradeId, payment_hash_hex: paymentHashHex })
+	          : null;
+	        return {
           type: 'sol_claimed_posted',
           channel,
           trade_id: tradeId,

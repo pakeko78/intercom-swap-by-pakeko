@@ -22,4 +22,9 @@ if (-not (Test-Path -Path $tokenFile)) {
 
 $scToken = (Get-Content -Raw -Path $tokenFile).Trim()
 
-node scripts/rfq-maker.mjs --url ("ws://127.0.0.1:{0}" -f $scPort) --token $scToken --receipts-db ("onchain/receipts/{0}.sqlite" -f $storeName) @rest
+$keypairFile = Join-Path $root ("stores/{0}/db/keypair.json" -f $storeName)
+if (-not (Test-Path -Path $keypairFile)) {
+  throw "Missing peer keypair file: $keypairFile`nHint: this should be created by the peer on first start (storeName=$storeName)."
+}
+
+node scripts/rfq-maker.mjs --url ("ws://127.0.0.1:{0}" -f $scPort) --token $scToken --peer-keypair $keypairFile --receipts-db ("onchain/receipts/{0}.sqlite" -f $storeName) @rest

@@ -5,6 +5,7 @@ import { INTERCOMSWAP_TOOLS } from './tools.js';
 import { OpenAICompatibleClient } from './openaiClient.js';
 import { AuditLog } from './audit.js';
 import { SecretStore, isSecretHandle } from './secrets.js';
+import { stableStringify } from '../util/stableStringify.js';
 
 function nowMs() {
   return Date.now();
@@ -48,9 +49,20 @@ function safeJsonParse(text) {
 function isValidStructuredFinal(value) {
   if (!isObject(value)) return { ok: false, error: 'final must be a JSON object' };
   const type = value.type;
-  const text = value.text;
   if (typeof type !== 'string' || !type.trim()) return { ok: false, error: 'final.type must be a non-empty string' };
-  if (typeof text !== 'string') return { ok: false, error: 'final.text must be a string' };
+  // Prevent accidentally treating a (possibly malformed) tool call as the final output.
+  // Tool calls must be executed via tool_calls parsing or the text-extraction fallback.
+  const t = type.trim();
+  if (t === 'tool' || t === 'tool_call' || t === 'function' || t === 'function_call') {
+    return { ok: false, error: 'final.type must not be a tool-call type' };
+  }
+  // We only require `.text` for a user-facing message.
+  // For operational flows, models often emit a structured status/result object
+  // (eg, {type:"info", ...} or {type:"swap_complete", ...}). Accept those.
+  if (t === 'message') {
+    const text = value.text;
+    if (typeof text !== 'string') return { ok: false, error: 'final.text must be a string when final.type=="message"' };
+  }
   return { ok: true, error: null };
 }
 
@@ -279,6 +291,12 @@ function messageHasToolCalls(message) {
   return false;
 }
 
+function isRepeatableTool(name) {
+  const n = String(name || '').trim();
+  // Allow polling tools to repeat without triggering loop-break logic.
+  return n === 'intercomswap_sc_wait_envelope' || n === 'intercomswap_ln_pay_status';
+}
+
 export class PromptRouter {
   constructor({
     llmConfig,
@@ -349,11 +367,46 @@ export class PromptRouter {
     );
     const toolFormat = this.llmConfig.toolFormat === 'functions' ? 'functions' : 'tools';
 
+    // Direct tool-call mode: if the user prompt itself is a tool call JSON object,
+    // execute it without invoking the LLM. This is useful for deterministic
+    // programmatic control (and when the LLM endpoint is offline).
+    {
+      const parsed = safeJsonParse(p);
+      const obj = parsed.ok ? parsed.value : null;
+      const isTool = isObject(obj) && String(obj.type || '').trim() === 'tool';
+      const name = isTool && typeof obj.name === 'string' ? obj.name.trim() : '';
+      const args = isTool && isObject(obj.arguments) ? obj.arguments : null;
+      if (isTool && name && allowedToolNames.has(name) && args) {
+        audit.write('direct_tool_prompt', { sessionId: id, name, arguments: args, autoApprove, dryRun });
+        const toolStartedAt = nowMs();
+        const toolResult = await this.toolExecutor.execute(name, args, { autoApprove, dryRun, secrets: session.secrets });
+        const toolResultForModel = sealToolResultForModel(toolResult, session.secrets);
+        const toolStep = {
+          type: 'tool',
+          name,
+          arguments: args,
+          started_at: toolStartedAt,
+          duration_ms: nowMs() - toolStartedAt,
+          result: toolResultForModel,
+        };
+        audit.write('tool_result', toolStep);
+        return {
+          session_id: id,
+          content: safeJsonStringify(toolResultForModel),
+          content_json: toolResultForModel,
+          steps: [toolStep],
+        };
+      }
+    }
+
     session.messages.push({ role: 'user', content: p });
 
     const steps = [];
     const max = maxSteps ?? this.maxSteps;
     let repairsUsed = 0;
+    let lastToolSig = null;
+    let repeatedToolStreak = 0;
+    let lastExecutedTool = null; // { name, arguments, result }
 
     for (let i = 0; i < max; i += 1) {
       const startedAt = nowMs();
@@ -383,7 +436,27 @@ export class PromptRouter {
       // structured tool call JSON object ({name,arguments}), treat it as a tool call.
       if ((!Array.isArray(llmOut.toolCalls) || llmOut.toolCalls.length === 0) && llmOut.content) {
         const fallback = extractToolCallFromText(llmOut.content, { allowedNames: allowedToolNames });
-        if (fallback) llmOut.toolCalls = [fallback];
+        if (fallback) {
+          // Synthesize a real OpenAI-style tool_calls message so the model reliably
+          // receives the tool result in the next turn (tool_call_id correlation).
+          const toolCallId = fallback.id && String(fallback.id).trim() ? String(fallback.id).trim() : randomUUID();
+          fallback.id = toolCallId;
+          llmOut.toolCalls = [fallback];
+          llmOut.message = {
+            role: 'assistant',
+            content: null,
+            tool_calls: [
+              {
+                id: toolCallId,
+                type: 'function',
+                function: {
+                  name: fallback.name,
+                  arguments: fallback.argumentsRaw || safeJsonStringify(fallback.arguments || {}),
+                },
+              },
+            ],
+          };
+        }
       }
 
       const llmStep = {
@@ -400,11 +473,56 @@ export class PromptRouter {
 
       // If there are tool calls, execute them, append tool results, and loop.
       if (Array.isArray(llmOut.toolCalls) && llmOut.toolCalls.length > 0) {
-        // IMPORTANT: preserve the assistant message that contains tool_calls in the transcript.
-        // Many OpenAI-compatible servers expect the exact assistant tool-call message to appear
-        // before any subsequent tool results (tool_call_id correlation, etc).
-        if (llmOut.message && typeof llmOut.message === 'object' && messageHasToolCalls(llmOut.message)) {
+        // Loop breaker: some models get stuck emitting the same tool call forever.
+        // If we see the exact same non-polling tool call repeated many times, return
+        // the last executed tool result to the caller.
+        if (llmOut.toolCalls.length === 1) {
+          const only = llmOut.toolCalls[0];
+          const sig = `${only?.name || ''}\n${stableStringify(only?.arguments || {})}`;
+          if (sig && sig === lastToolSig && !isRepeatableTool(only?.name)) repeatedToolStreak += 1;
+          else {
+            lastToolSig = sig;
+            repeatedToolStreak = 1;
+          }
+          if (repeatedToolStreak >= 2 && lastExecutedTool && lastExecutedTool.name === only?.name) {
+            audit.write('loop_break', {
+              i,
+              reason: 'repeated_tool_call',
+              tool: lastExecutedTool.name,
+              arguments: lastExecutedTool.arguments,
+              streak: repeatedToolStreak,
+            });
+            return {
+              session_id: id,
+              content: safeJsonStringify({
+                type: 'loop_break',
+                reason: 'repeated_tool_call',
+                tool: lastExecutedTool.name,
+                arguments: lastExecutedTool.arguments,
+                last_result: lastExecutedTool.result,
+              }),
+              content_json: {
+                type: 'loop_break',
+                reason: 'repeated_tool_call',
+                tool: lastExecutedTool.name,
+                arguments: lastExecutedTool.arguments,
+                last_result: lastExecutedTool.result,
+              },
+              steps,
+            };
+          }
+        } else {
+          repeatedToolStreak = 0;
+          lastToolSig = null;
+        }
+
+        // Preserve the assistant tool-call message in the transcript so the model/server can
+        // correlate subsequent tool results. If we don't have a structured message, preserve
+        // at least the assistant text (fallback tool-call JSON in content).
+        if (llmOut.message && typeof llmOut.message === 'object') {
           session.messages.push(llmOut.message);
+        } else {
+          session.messages.push({ role: 'assistant', content: llmOut.content || '' });
         }
 
         for (const call of llmOut.toolCalls) {
@@ -426,6 +544,7 @@ export class PromptRouter {
             secrets: session.secrets,
           });
           const toolResultForModel = sealToolResultForModel(toolResult, session.secrets);
+          lastExecutedTool = { name: call.name, arguments: call.arguments, result: toolResultForModel };
           const toolStep = {
             type: 'tool',
             name: call.name,
@@ -466,7 +585,8 @@ export class PromptRouter {
           content:
             'INVALID_OUTPUT. Output ONLY one of:\n' +
             '1) Tool call JSON: {"type":"tool","name":"<tool_name>","arguments":{...}}\n' +
-            '2) Final message JSON: {"type":"message","text":"..."}\n' +
+            '2) Final JSON: {"type":"message","text":"..."} (preferred)\n' +
+            'Or a structured final JSON object with at least: {"type":"<non-empty>"} where type is NOT "tool".\n' +
             'Do NOT output plans or any other keys. Re-emit now.',
         });
         continue;

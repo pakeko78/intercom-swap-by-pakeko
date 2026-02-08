@@ -290,6 +290,24 @@ export const INTERCOMSWAP_TOOLS = [
     },
     required: ['channel', 'trade_id', 'terms_hash_hex'],
   }),
+  tool(
+    'intercomswap_terms_accept_from_terms',
+    'Taker: post signed ACCEPT inside swap:<id> from a TERMS envelope (computes terms hash).',
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        channel: channelParam,
+        terms_envelope: {
+          anyOf: [
+            { type: 'object', description: 'Full signed TERMS envelope received from the network.' },
+            { type: 'string', pattern: '^secret:[0-9a-fA-F-]{10,}$', description: 'Secret handle to a TERMS envelope.' },
+          ],
+        },
+      },
+      required: ['channel', 'terms_envelope'],
+    }
+  ),
 
   // Lightning (LN) operator actions (executor must use configured backend/credentials).
   tool('intercomswap_ln_info', 'Get Lightning node info (impl/backend configured locally).', emptyParams),
@@ -405,6 +423,36 @@ export const INTERCOMSWAP_TOOLS = [
       ],
     }
   ),
+  tool(
+    'intercomswap_swap_verify_pre_pay',
+    'Taker: verify (terms + LN invoice + Sol escrow) and validate the escrow exists on-chain before paying.',
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        terms_envelope: {
+          anyOf: [
+            { type: 'object', description: 'Full signed TERMS envelope received from the network.' },
+            { type: 'string', pattern: '^secret:[0-9a-fA-F-]{10,}$', description: 'Secret handle to a TERMS envelope.' },
+          ],
+        },
+        invoice_envelope: {
+          anyOf: [
+            { type: 'object', description: 'Full signed LN_INVOICE envelope received from the network.' },
+            { type: 'string', pattern: '^secret:[0-9a-fA-F-]{10,}$', description: 'Secret handle to an LN_INVOICE envelope.' },
+          ],
+        },
+        escrow_envelope: {
+          anyOf: [
+            { type: 'object', description: 'Full signed SOL_ESCROW_CREATED envelope received from the network.' },
+            { type: 'string', pattern: '^secret:[0-9a-fA-F-]{10,}$', description: 'Secret handle to a SOL_ESCROW_CREATED envelope.' },
+          ],
+        },
+        now_unix: { ...unixSecParam, description: 'Optional unix seconds for expiry checks; defaults to now.' },
+      },
+      required: ['terms_envelope', 'invoice_envelope', 'escrow_envelope'],
+    }
+  ),
   tool('intercomswap_swap_ln_pay_and_post', 'Taker: pay the LN invoice and post LN_PAID into swap:<id>.', {
     type: 'object',
     additionalProperties: false,
@@ -416,6 +464,55 @@ export const INTERCOMSWAP_TOOLS = [
     },
     required: ['channel', 'trade_id', 'bolt11', 'payment_hash_hex'],
   }),
+  tool(
+    'intercomswap_swap_ln_pay_and_post_from_invoice',
+    'Taker: pay an LN invoice from an LN_INVOICE envelope and post LN_PAID into swap:<id> (no manual bolt11/payment_hash copying).',
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        channel: channelParam,
+        invoice_envelope: {
+          anyOf: [
+            { type: 'object', description: 'Full signed LN_INVOICE envelope received from the network.' },
+            { type: 'string', pattern: '^secret:[0-9a-fA-F-]{10,}$', description: 'Secret handle to an LN_INVOICE envelope.' },
+          ],
+        },
+      },
+      required: ['channel', 'invoice_envelope'],
+    }
+  ),
+  tool(
+    'intercomswap_swap_ln_pay_and_post_verified',
+    'Taker: verify (terms + invoice + escrow on-chain), then pay the LN invoice and post LN_PAID into swap:<id>.',
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        channel: channelParam,
+        terms_envelope: {
+          anyOf: [
+            { type: 'object', description: 'Full signed TERMS envelope received from the network.' },
+            { type: 'string', pattern: '^secret:[0-9a-fA-F-]{10,}$', description: 'Secret handle to a TERMS envelope.' },
+          ],
+        },
+        invoice_envelope: {
+          anyOf: [
+            { type: 'object', description: 'Full signed LN_INVOICE envelope received from the network.' },
+            { type: 'string', pattern: '^secret:[0-9a-fA-F-]{10,}$', description: 'Secret handle to an LN_INVOICE envelope.' },
+          ],
+        },
+        escrow_envelope: {
+          anyOf: [
+            { type: 'object', description: 'Full signed SOL_ESCROW_CREATED envelope received from the network.' },
+            { type: 'string', pattern: '^secret:[0-9a-fA-F-]{10,}$', description: 'Secret handle to a SOL_ESCROW_CREATED envelope.' },
+          ],
+        },
+        now_unix: { ...unixSecParam, description: 'Optional unix seconds for expiry checks; defaults to now.' },
+      },
+      required: ['channel', 'terms_envelope', 'invoice_envelope', 'escrow_envelope'],
+    }
+  ),
   tool('intercomswap_swap_sol_claim_and_post', 'Taker: claim Solana escrow and post SOL_CLAIMED into swap:<id>.', {
     type: 'object',
     additionalProperties: false,

@@ -38,7 +38,7 @@ Intercom is a single long-running Pear process that participates in three distin
   |      --subnet-bootstrap <admin-writer-key-hex>  (joiners only)          |
   |                                                                         |
   |  [2] Sidechannel plane (ephemeral messaging)                             |
-  |      entry: 0000intercom   (name-only, open to all)                     |
+  |      entry (default open): 0000intercom   (name-only, open to all)      |
   |      extras: --sidechannels chan1,chan2                                 |
   |      policy (per channel): welcome / owner-only write / invites         |
   |      relay: optional peers forward plaintext payloads to others          |
@@ -149,25 +149,25 @@ Install this repo using SKILL.md, run all tests (unit + e2e), then run the mainn
 ## Conceptual Flow (BTC(LN) <> USDT(Solana))
 
 ```text
-Rendezvous (directory only)                      Trade negotiation
-0000intercom                                     0000intercomswapbtcusdt
-    |                                                   |
-    | (svc_announce: {name,pairs,rfq_channels})         |  RFQ -> QUOTE -> QUOTE_ACCEPT
-    |                                                   v
-    +----------------------------------------------> per-trade invite
-                                                     swap:<trade_id> (invite-only)
-                                                         |
-                                                         |  TERMS (includes fees, mint, refund timeout)
-                                                         |  ACCEPT
-                                                         |  LN_INVOICE (payment_hash)
-                                                         |  SOL_ESCROW_CREATED (escrow PDA + vault)
-                                                         v
-Settlement
-  1) Maker creates LN invoice and Solana escrow keyed by payment_hash
+Rendezvous sidechannel(s) (any; examples: 0000intercom, 0000intercomswapbtcusdt, my-swap-room)
+    |
+    | swap.svc_announce (service + offers[])  [periodic rebroadcast; sidechannels have no history]
+    | Offer (optional) -> RFQ (manual or auto-from-offer) -> QUOTE -> QUOTE_ACCEPT
+    |   - pre-filter by app_hash + fee caps + refund window
+    v
+per-trade invite-only swap:<trade_id>
+    |
+    | TERMS (binding: fees, mint, refund_after_unix, ...)
+    | ACCEPT
+    | LN_INVOICE (payment_hash)
+    | SOL_ESCROW_CREATED (escrow PDA + vault ATA)
+    v
+Settlement (BTC over Lightning <> USDT on Solana)
+  1) Maker escrows USDT (Solana) and creates LN invoice keyed by payment_hash
   2) Taker verifies escrow on-chain (hard rule: no escrow, no pay)
   3) Taker pays LN invoice -> learns preimage
   4) Taker claims USDT on Solana using preimage
-  5) Refund path after timeout if LN payment never happens
+  5) Refund path after sol_refund_after_unix if LN payment never happens
 ```
 
 ## External APIs / RPCs (Defaults)
@@ -226,7 +226,7 @@ Notes:
 | Item | Details |
 |---|---|
 | Token files | Created under `onchain/sc-bridge/<storeName>.token` (gitignored). |
-| RFQ channel | Any channel works. Use a dedicated rendezvous like `0000intercomswapbtcusdt` for trading, and keep `0000intercom` for service presence only. |
+| RFQ channel | Any sidechannel works. Many operators use a dedicated rendezvous (example: `0000intercomswapbtcusdt`) to reduce noise, but `0000intercom` works too. |
 | Subnet channel | Keep `--subnet-channel` consistent across peers (mismatches can prevent connections). |
 
 ---

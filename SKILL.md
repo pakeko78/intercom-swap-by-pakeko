@@ -1122,7 +1122,14 @@ Recovery tool:
 ### Local Unattended E2E (Recommended)
 Prereqs:
 - Node 22.x + Pear runtime (see above).
-- Docker (for the LN regtest stack).
+- A running **Docker daemon** (only required when `ln.backend=docker`, or when running the LN regtest stacks used by e2e).
+  - Sanity check: `docker info` and `docker compose version`
+  - macOS: any Docker daemon is fine (Docker Desktop, Colima, etc).
+  - Linux: the `docker` service must be running.
+  - You generally do **not** need to run docker commands manually:
+    - Collin: Overview step `4) Lightning readiness` -> `Start LN (docker)` / `ln_docker_ps`
+    - Tools: `intercomswap_ln_docker_up`, `intercomswap_ln_docker_ps`, `intercomswap_ln_docker_down`
+    - These run `docker compose` against the compose file configured in `onchain/prompt/setup.json` (default `dev/ln-regtest/docker-compose.yml`).
 - Rust toolchain + Solana CLI (for `cargo build-sbf` and `solana-test-validator`).
 
 Run:

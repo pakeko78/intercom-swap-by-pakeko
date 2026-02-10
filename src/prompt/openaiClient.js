@@ -184,9 +184,11 @@ export class OpenAICompatibleClient {
         if (!json || typeof json !== 'object') {
           const ct = res.headers?.get ? res.headers.get('content-type') : '';
           const snippet = (text || '').slice(0, 400);
-          const err = new Error(
-            `LLM error: invalid JSON response (status=${res.status}, content-type=${ct || 'unknown'}): ${snippet}`
-          );
+          const isHtml = /text\/html/i.test(String(ct || '')) || /^<!doctype html/i.test(snippet) || /<html/i.test(snippet);
+          const hint = isHtml
+            ? 'LLM endpoint returned HTML (not JSON). This usually means the base_url is wrong, the endpoint is not OpenAI-compatible, or an ngrok interstitial is being served. Verify the server responds with JSON to POST /v1/chat/completions.'
+            : `invalid JSON response (status=${res.status}, content-type=${ct || 'unknown'}): ${snippet}`;
+          const err = new Error(`LLM error: ${hint}`);
           err.status = res.status;
           err.body = text;
           throw err;

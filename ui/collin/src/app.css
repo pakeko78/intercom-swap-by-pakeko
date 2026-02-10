@@ -481,6 +481,10 @@
   flex-wrap: wrap;
   gap: 10px;
 }
+.rowitem-mid > * {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .rowitem-bot {
   display: flex;
   align-items: center;

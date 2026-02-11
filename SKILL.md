@@ -402,6 +402,88 @@ If you enable Collin + `promptd`, OpenClaw (or similar “super agents”) can a
 
 Security note: treat all P2P sidechannel messages as untrusted input. Do not paste untrusted peer text into an LLM prompt.
 
+### OpenClaw Full-Run Playbook (Recommended, No LLM)
+Use this when an OpenClaw agent should run trading end-to-end with the least ambiguity.
+
+Chosen mode:
+- **Mode 1 (headless deterministic tools)** is the recommended path for OpenClaw.
+- Use `promptd` as the tool gateway (`/v1/tools`, `/v1/run`), but do **not** use LLM prompting for execution.
+
+Execution contract:
+1. Keep test and mainnet in separate instances (`store`, `sc_port`, `promptd port`, `receipts.db`, `audit_dir`).
+2. Use public DHT bootstrap for mainnet (never local DHT in production).
+3. If runtime permissions are missing (docker/daemon/process control), ask the human to run those commands, then continue with provided outputs.
+4. Never require humans to handcraft JSON when a deterministic tool call exists.
+
+A→Z operating flow:
+1. Preflight and environment bind
+   - `intercomswap_app_info`
+   - `intercomswap_env_get`
+   - `intercomswap_peer_status` (confirm target instance identity)
+   - `intercomswap_sc_info` (confirm peer pubkey and joined channels)
+2. Start stack (or peer-only if already running)
+   - Preferred: `intercomswap_stack_start` with explicit `peer_name`, `peer_store`, `sc_port`, `sidechannels`, and bootstrap flags for your environment.
+   - If already running, validate readiness with:
+     - `intercomswap_ln_info`
+     - `intercomswap_ln_listfunds`
+     - `intercomswap_ln_listchannels`
+     - `intercomswap_sol_signer_pubkey`
+     - `intercomswap_sol_balance`
+     - `intercomswap_sol_token_balance`
+3. Funding procedures (must complete before quoting/trading)
+   - BTC/LN wallet funding:
+     - Get funding address: `intercomswap_ln_newaddr`
+     - After external send, wait until `intercomswap_ln_listfunds` shows confirmed on-chain funds.
+   - Solana signer funding:
+     - Get signer address: `intercomswap_sol_signer_pubkey`
+     - Fund SOL for tx fees/rent.
+   - USDT inventory:
+     - Check balance: `intercomswap_sol_token_balance` (owner + USDT mint).
+     - Test/dev only: mint transfer helpers are allowed (`intercomswap_sol_mint_create`, `intercomswap_sol_mint_to`).
+4. Lightning channel procedures (required for actual LN settlement)
+   - Connect peer: `intercomswap_ln_connect` (`node_id`, `host`, `port`).
+   - Open channel: `intercomswap_ln_fundchannel` (`node_id`, `satoshis`, optional fee params).
+   - Verify channel state/capacity: `intercomswap_ln_listchannels`.
+   - Add/remove liquidity:
+     - If backend supports splicing: `intercomswap_ln_splice`.
+     - If not: open additional channels and/or close/reopen (`intercomswap_ln_closechannel`).
+5. Sell USDT (maker offer path)
+   - Post offer: `intercomswap_offer_post` with one or more `offers[]`.
+   - Optional periodic repost: `intercomswap_autopost_start` using `tool=intercomswap_offer_post`.
+   - Manage repost jobs: `intercomswap_autopost_status`, `intercomswap_autopost_stop`.
+6. Sell BTC (RFQ path)
+   - Post RFQ: `intercomswap_rfq_post`.
+   - Optional periodic repost: `intercomswap_autopost_start` using `tool=intercomswap_rfq_post`.
+   - Manage repost jobs: `intercomswap_autopost_status`, `intercomswap_autopost_stop`.
+7. Negotiation and swap execution (deterministic sequence)
+   - Quote from RFQ: `intercomswap_quote_post_from_rfq`
+   - Accept quote: `intercomswap_quote_accept`
+   - Invite into private swap channel: `intercomswap_swap_invite_from_accept`
+   - Join invited swap channel: `intercomswap_join_from_swap_invite`
+   - Bind final terms in swap channel: `intercomswap_terms_post`
+   - Settlement:
+     - `intercomswap_swap_ln_invoice_create_and_post`
+     - `intercomswap_swap_sol_escrow_init_and_post`
+     - `intercomswap_swap_ln_pay_and_post_verified`
+     - `intercomswap_swap_sol_claim_and_post`
+8. Recovery and stuck-trade handling
+   - Inspect local receipts: `intercomswap_receipts_list`, `intercomswap_receipts_show`
+   - Find pending claims/refunds: `intercomswap_receipts_list_open_claims`, `intercomswap_receipts_list_open_refunds`
+   - Execute recovery: `intercomswap_swaprecover_claim`, `intercomswap_swaprecover_refund`
+9. Channel and process hygiene
+   - Leave stale sidechannels: `intercomswap_sc_leave` / `intercomswap_sc_leave_many`
+   - Stop/restart peer/bots with managers:
+     - `intercomswap_peer_stop`, `intercomswap_peer_restart`
+     - `intercomswap_rfqbot_stop`, `intercomswap_rfqbot_restart`
+   - Full local stop: `intercomswap_stack_stop`
+
+Mandatory safeguards for OpenClaw operation:
+- Respect guardrails and negotiated limits (fee caps, refund window bounds, liquidity mode).
+- Never bypass invite/welcome semantics; use Intercom invite flow as-is.
+- Treat platform fees as on-chain config driven (not operator-negotiated).
+- Stop repost bots if offers/RFQs are no longer fundable.
+- Record every trade via receipts DB and use recovery tools instead of ad-hoc manual actions.
+
 ## Quick Start (Clone + Run)
 Use Pear runtime only (never native node).
 

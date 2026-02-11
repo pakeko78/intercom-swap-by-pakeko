@@ -691,6 +691,22 @@ function App() {
 
   const joinedChannelsSet = useMemo(() => new Set(joinedChannels), [joinedChannels]);
 
+  // Terminal swap events observed on sidechannels. Once a trade is in a terminal state we treat any lingering
+  // swap_invite as stale and auto-hygiene will leave its swap:* channel.
+  const terminalTradeIdsSet = useMemo(() => {
+    const out = new Set<string>();
+    for (const e of scEvents) {
+      try {
+        const kind = String((e as any)?.kind || '').trim();
+        if (kind !== 'swap.sol_claimed' && kind !== 'swap.sol_refunded' && kind !== 'swap.cancel') continue;
+        const msg = (e as any)?.message;
+        const tradeId = String((e as any)?.trade_id || msg?.trade_id || '').trim();
+        if (tradeId) out.add(tradeId);
+      } catch (_e) {}
+    }
+    return out;
+  }, [scEvents]);
+
  const inviteEvents = useMemo(() => {
     const now = uiNowMs;
     const out: any[] = [];
@@ -700,22 +716,25 @@ function App() {
         if (String((e as any)?.kind || '') !== 'swap.swap_invite') continue;
         const msg = (e as any)?.message;
         const tradeId = String(msg?.trade_id || (e as any)?.trade_id || '').trim();
+        const done = Boolean(tradeId && terminalTradeIdsSet.has(tradeId));
         const swapCh = String(msg?.body?.swap_channel || '').trim();
         const joined = Boolean(swapCh && joinedChannelsSet.has(swapCh));
         const expiresAtRaw = msg?.body?.invite?.payload?.expiresAt;
         const expiresAtMs = epochToMs(expiresAtRaw);
         const expired = expiresAtMs && Number.isFinite(expiresAtMs) && expiresAtMs > 0 ? now > expiresAtMs : false;
         if (expired && !showExpiredInvites) continue;
+        // Trades that are already done (claimed/refunded/canceled) should not linger in the invites inbox.
+        if (done && !showDismissedInvites) continue;
         if (tradeId && dismissedInviteTradeIds && dismissedInviteTradeIds[tradeId] && !showDismissedInvites) continue;
 
         const key = `${tradeId || ''}|${swapCh || ''}|${String((e as any)?.from || '')}|${String((e as any)?.seq || '')}`;
         if (key && seen.has(key)) continue;
         if (key) seen.add(key);
-        out.push({ ...e, _invite_expires_at_ms: expiresAtMs, _invite_expired: expired, _invite_joined: joined });
+        out.push({ ...e, _invite_expires_at_ms: expiresAtMs, _invite_expired: expired, _invite_joined: joined, _invite_done: done });
       } catch (_e) {}
     }
     return out;
-  }, [scEvents, showExpiredInvites, dismissedInviteTradeIds, showDismissedInvites, uiNowMs, joinedChannelsSet]);
+  }, [scEvents, showExpiredInvites, dismissedInviteTradeIds, showDismissedInvites, uiNowMs, joinedChannelsSet, terminalTradeIdsSet]);
 
   const knownChannels = useMemo(() => {
     const set = new Set<string>();
@@ -740,8 +759,10 @@ function App() {
     return set;
   }, [scChannels]);
 
-  // Auto-hygiene: if a swap invite expires and we're still joined to its swap channel, leave automatically.
-  // This keeps peers from "sitting" in dead swap:* channels forever (and reduces confusion in Invites).
+  // Auto-hygiene:
+  // - If a swap invite expires OR the trade hits a terminal state (claimed/refunded/canceled),
+  //   and we're still joined to its swap:* channel, leave automatically.
+  // - Auto-dismiss expired/done invites so the inbox only contains actionable items.
   const autoLeftSwapChRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!health?.ok) return;
@@ -759,10 +780,11 @@ function App() {
         if (!swapCh || !swapCh.startsWith('swap:')) continue;
         if (!joinedSet.has(swapCh)) continue;
         if (autoLeftSwapChRef.current.has(swapCh)) continue;
-        const expiresAtMs = epochToMs(msg?.body?.invite?.payload?.expiresAt);
-        if (!expiresAtMs || !Number.isFinite(expiresAtMs) || expiresAtMs < 1) continue;
-        if (now <= expiresAtMs) continue;
-        candidates.push({ swapCh, tradeId, expiresAtMs });
+        const done = Boolean(tradeId && terminalTradeIdsSet.has(tradeId));
+        const expiresAtMs = epochToMs(msg?.body?.invite?.payload?.expiresAt) || 0;
+        const expired = expiresAtMs && Number.isFinite(expiresAtMs) && expiresAtMs > 0 ? now > expiresAtMs : false;
+        if (!done && !expired) continue;
+        candidates.push({ swapCh, tradeId, expiresAtMs: expiresAtMs || now });
       } catch (_e) {}
     }
     if (candidates.length === 0) return;
@@ -777,7 +799,7 @@ function App() {
           await runToolFinal('intercomswap_sc_leave', { channel: c.swapCh }, { auto_approve: true });
           if (watchedChannelsSet.has(c.swapCh)) unwatchChannel(c.swapCh);
           if (c.tradeId) dismissInviteTrade(c.tradeId);
-          pushToast('info', `Auto-left expired swap channel: ${c.swapCh}`, { ttlMs: 6_000 });
+          pushToast('info', `Auto-left stale swap channel: ${c.swapCh}`, { ttlMs: 6_000 });
           void refreshPreflight();
         } catch (_err) {
           // If leave fails (peer down), allow retry later.
@@ -789,7 +811,34 @@ function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [health?.ok, joinedChannels, scEvents, uiNowMs, watchedChannelsSet]);
+  }, [health?.ok, joinedChannels, scEvents, uiNowMs, watchedChannelsSet, terminalTradeIdsSet]);
+
+  // Auto-dismiss stale invites even if we aren't joined. This keeps the invites inbox actionable.
+  const autoDismissTradeRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!health?.ok) return;
+    const now = uiNowMs;
+    const toDismiss: string[] = [];
+    for (const e of scEvents) {
+      try {
+        if (String((e as any)?.kind || '') !== 'swap.swap_invite') continue;
+        const msg = (e as any)?.message;
+        const tradeId = String(msg?.trade_id || (e as any)?.trade_id || '').trim();
+        if (!tradeId) continue;
+        if (dismissedInviteTradeIds && dismissedInviteTradeIds[tradeId]) continue;
+        if (autoDismissTradeRef.current.has(tradeId)) continue;
+        const done = terminalTradeIdsSet.has(tradeId);
+        const expiresAtMs = epochToMs(msg?.body?.invite?.payload?.expiresAt) || 0;
+        const expired = expiresAtMs && Number.isFinite(expiresAtMs) && expiresAtMs > 0 ? now > expiresAtMs : false;
+        if (!done && !expired) continue;
+        autoDismissTradeRef.current.add(tradeId);
+        toDismiss.push(tradeId);
+      } catch (_e) {}
+    }
+    if (toDismiss.length === 0) return;
+    for (const tid of toDismiss.slice(0, 20)) dismissInviteTrade(tid);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [health?.ok, scEvents, uiNowMs, dismissedInviteTradeIds, terminalTradeIdsSet]);
 
   function dismissInviteTrade(tradeIdRaw: string) {
     const tradeId = String(tradeIdRaw || '').trim();
@@ -4085,24 +4134,7 @@ function App() {
 	        {activeTab === 'invites' ? (
 	          <div className="grid2">
 	            <Panel title="Swap Invites">
-                <div className="row">
-                  <label className="row">
-                    <input
-                      type="checkbox"
-                      checked={showExpiredInvites}
-                      onChange={(e) => setShowExpiredInvites(Boolean(e.target.checked))}
-                    />
-                    <span className="mono">show expired</span>
-                  </label>
-                  <label className="row">
-                    <input
-                      type="checkbox"
-                      checked={showDismissedInvites}
-                      onChange={(e) => setShowDismissedInvites(Boolean(e.target.checked))}
-                    />
-                    <span className="mono">show dismissed</span>
-                  </label>
-                </div>
+	              <p className="muted small">Actionable invites only. Expired/done invites are auto-hidden.</p>
 	              <VirtualList
 	                items={inviteEvents}
 	                itemKey={(e) => String(e.db_id || e.seq || e.ts || Math.random())}
@@ -5103,6 +5135,29 @@ function App() {
 	                <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
 	                auto_approve
 	              </label>
+	            </div>
+	            <div className="field">
+	              <div className="field-hd">
+	                <span className="mono">Invites (Advanced)</span>
+	              </div>
+	              <div className="row">
+	                <label className="check small">
+	                  <input
+	                    type="checkbox"
+	                    checked={showExpiredInvites}
+	                    onChange={(e) => setShowExpiredInvites(Boolean(e.target.checked))}
+	                  />
+	                  show expired invites
+	                </label>
+	                <label className="check small">
+	                  <input
+	                    type="checkbox"
+	                    checked={showDismissedInvites}
+	                    onChange={(e) => setShowDismissedInvites(Boolean(e.target.checked))}
+	                  />
+	                  show dismissed/done invites
+	                </label>
+	              </div>
 	            </div>
 	            <div className="field">
 	              <div className="field-hd">
@@ -6642,6 +6697,7 @@ function InviteRow({
       ? (evt._invite_expires_at_ms as number)
       : epochToMs(body?.invite?.payload?.expiresAt);
   const expired = Boolean(evt?._invite_expired);
+  const done = Boolean(evt?._invite_done);
   const expIso = expiresAtMs ? msToUtcIso(expiresAtMs) : '';
 
   return (
@@ -6649,6 +6705,7 @@ function InviteRow({
       <div className="rowitem-top">
         <span className="mono chip">{evt.channel}</span>
         {swapChannel ? <span className="mono chip hi">{swapChannel}</span> : null}
+        {done ? <span className="mono chip">done</span> : null}
         {expired ? <span className="mono chip warn">expired</span> : null}
         {watched ? <span className="mono chip">watched</span> : null}
         {joined ? <span className="mono chip">joined</span> : null}

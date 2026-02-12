@@ -1397,6 +1397,21 @@ export class TradeAutoManager {
           if (!tradeId || !ctx.myRfqTradeIds.has(tradeId)) continue;
           if (ctx.terminalTradeIds.has(tradeId)) continue;
           if (this._autoAcceptedTradeLock.has(tradeId)) continue;
+          // If our RFQ expired, do not auto-accept quotes for it.
+          const neg = ctx.swapNegotiationByTrade && typeof ctx.swapNegotiationByTrade.get === 'function'
+            ? ctx.swapNegotiationByTrade.get(tradeId)
+            : null;
+          const rfqEnv = isObject(neg?.rfq) ? neg.rfq : null;
+          if (rfqEnv && isEnvelopeExpired({ message: rfqEnv }, nowSec)) {
+            this._autoAcceptedQuoteSig.add(sig);
+            this._clearEventRetry('accept_quote', sig);
+            this._trace('auto_accept_skip_expired_rfq', {
+              trade_id: tradeId,
+              channel: String(quoteEvt?.channel || '').trim(),
+              quote_sig: sig.slice(0, 16),
+            });
+            continue;
+          }
           try {
             await this._runToolWithTimeout({
               tool: 'intercomswap_quote_accept',
@@ -1443,6 +1458,7 @@ export class TradeAutoManager {
       }
 
       if (this.opts.enable_invite_from_accepts && actionsLeft > 0) {
+        const nowSec = Math.floor(Date.now() / 1000);
         const accepts = [...ctx.acceptEvents].reverse();
         for (const e of accepts) {
           if (actionsLeft <= 0) break;
@@ -1453,6 +1469,16 @@ export class TradeAutoManager {
           const quoteId = String(e?.message?.body?.quote_id || '').trim().toLowerCase();
           const myQuote = ctx.myQuoteById.get(quoteId);
           if (!myQuote) continue;
+          if (isEnvelopeExpired(myQuote.event, nowSec)) {
+            this._autoInvitedAcceptSig.add(sig);
+            this._clearEventRetry('invite_from_accept', sig);
+            this._trace('auto_invite_skip_expired_quote', {
+              trade_id: envelopeTradeId(e),
+              channel: String(e?.channel || myQuote.channel || '').trim(),
+              accept_sig: sig.slice(0, 16),
+            });
+            continue;
+          }
           try {
             const tradeId = envelopeTradeId(e);
             const out = await this._runToolWithTimeout({
@@ -1517,6 +1543,18 @@ export class TradeAutoManager {
           if (!this._canRunEvent('join_invite', sig)) continue;
           const tradeId = envelopeTradeId(e);
           if (tradeId && ctx.terminalTradeIds.has(tradeId)) continue;
+          const expiresAtMs = epochToMs(e?.message?.body?.invite?.payload?.expiresAt);
+          if (expiresAtMs > 0 && Date.now() > expiresAtMs) {
+            this._autoJoinedInviteSig.add(sig);
+            this._clearEventRetry('join_invite', sig);
+            this._trace('auto_join_skip_expired_invite', {
+              trade_id: tradeId,
+              channel: String(e?.channel || '').trim(),
+              invite_sig: sig.slice(0, 16),
+              expires_at_ms: expiresAtMs,
+            });
+            continue;
+          }
           const invitee = String(e?.message?.body?.invite?.payload?.inviteePubKey || '').trim().toLowerCase();
           if (invitee && localPeer && invitee !== localPeer) {
             this._trace('auto_join_skip_invitee_mismatch', {

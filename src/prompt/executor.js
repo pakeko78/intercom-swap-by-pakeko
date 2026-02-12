@@ -2567,7 +2567,9 @@ export class ToolExecutor {
             trace_enabled: false,
             ln_liquidity_mode: 'aggregate',
             enable_quote_from_offers: true,
-            enable_quote_from_rfqs: true,
+            // Safety default: only quote RFQs when they match a local Offer line.
+            // (enable_quote_from_rfqs would quote any RFQ even without a local offer match.)
+            enable_quote_from_rfqs: false,
             enable_accept_quotes: true,
             enable_invite_from_accepts: true,
             enable_join_invites: true,
@@ -2703,8 +2705,31 @@ export class ToolExecutor {
       for (const ch of list) this._scSubscribed.add(ch);
       if (dryRun) return { type: 'dry_run', tool: toolName, channels: list };
       const sc = await this._scEnsurePersistent();
-      await sc.subscribe(list);
-      return { type: 'subscribed', channels: Array.from(this._scSubscribed) };
+      // subscribe() on SC-Bridge is treated as "set subscription list" by some runtimes, so we must
+      // avoid clobbering channels joined/subscribed by other clients connected to the same peer.
+      //
+      // Strategy:
+      // - keep an internal monotonic set of channels subscribed via promptd tools (`_scSubscribed`)
+      // - merge with the peer's current channel set as reported by stats (best-effort)
+      // - send the merged set back to subscribe()
+      let existing = [];
+      try {
+        const st = await sc.stats();
+        existing = Array.isArray(st?.channels) ? st.channels : [];
+      } catch (_e) {
+        existing = [];
+      }
+      const merged = new Set();
+      for (const raw of existing) {
+        const ch = normalizeChannelName(String(raw || ''));
+        if (ch) merged.add(ch);
+      }
+      for (const ch of this._scSubscribed) {
+        if (ch) merged.add(ch);
+      }
+      const mergedList = Array.from(merged).slice(0, 256);
+      await sc.subscribe(mergedList);
+      return { type: 'subscribed', channels: mergedList };
     }
 
     if (toolName === 'intercomswap_sc_wait_envelope') {

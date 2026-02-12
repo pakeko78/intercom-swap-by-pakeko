@@ -697,7 +697,7 @@ Recently added/changed tools and guardrails:
 - `intercomswap_tradeauto_start` / `intercomswap_tradeauto_status` / `intercomswap_tradeauto_stop`: backend multi-trade automation worker (quote/accept/invite/join/settlement orchestration).
   - quote source controls:
     - `enable_quote_from_offers`: quote RFQs only when a local Offer line matches.
-    - `enable_quote_from_rfqs`: quote actionable RFQs even without a local Offer match.
+    - `enable_quote_from_rfqs`: quote RFQs even without a local Offer match (dangerous; disabled by default in stack/promptd/collin).
   - liquidity mode:
     - `ln_liquidity_mode` supports `single_channel` and `aggregate` for automated accepts.
   - trace defaults: worker trace is OFF by default; toggle explicitly with `intercomswap_tradeauto_trace_set`.
@@ -710,7 +710,7 @@ Recently added/changed tools and guardrails:
   - ownership detection: worker resolves local peer identity from SC info shapes returned by runtime (`peer` and `info.peerPubkey` variants) to avoid false `not_owner` settlement skips.
 - `intercomswap_tradeauto_trace_set`: enable/disable backend trace emission at runtime without restarting the full stack.
 - `intercomswap_swap_status_post`: signed status/liveness envelope helper for swap channels.
-- `intercomswap_stack_start`: now auto-starts backend trade automation (rendezvous channels + settlement stages) and reports worker status/errors.
+- `intercomswap_stack_start`: auto-starts backend trade automation (safe defaults; only quotes RFQs that match local offers) and reports worker status/errors.
 - `intercomswap_stack_stop`: now also stops backend trade automation.
 - Swap maker invoice path (`intercomswap_swap_ln_invoice_create_and_post`) now uses normal invoice routing behavior (no forced private-route-hint mode).
 - Autopost safety: jobs stop on insufficient-funds/liquidity errors (in addition to expiry/fill stops).

@@ -9,6 +9,9 @@ ui/**/dist-ssr
 .idea/
 .DS_Store
 
+# Test artifacts
+test-results/
+
 # Local planning / scratch (intentionally untracked)
 progress.md
 

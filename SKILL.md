@@ -480,7 +480,7 @@ A→Z operating flow:
      - default backend automation profile includes:
        - `ln_liquidity_mode=aggregate`
        - `enable_quote_from_offers=true`
-       - `enable_quote_from_rfqs=true`
+       - `enable_quote_from_rfqs=false` (safety default; prevents quoting arbitrary RFQs)
    - Trade worker trace is OFF by default (recommended for production). Enable only for debugging with `intercomswap_tradeauto_trace_set`.
    - Reconfigure automation explicitly (channels, liquidity mode, refund defaults, enable/disable stages) with `intercomswap_tradeauto_start`.
    - If already running, validate readiness with:
@@ -546,9 +546,9 @@ A→Z operating flow:
    - Manage repost jobs: `intercomswap_autopost_status`, `intercomswap_autopost_stop`.
 7. Negotiation and swap execution (deterministic)
    - Preferred (backend worker): keep `intercomswap_tradeauto_start` running and let it orchestrate quote/accept/invite/join + settlement stages.
-   - For full maker+taker automation across both offer and RFQ routes, keep both quote-source flags enabled:
-     - `enable_quote_from_offers=true`
-     - `enable_quote_from_rfqs=true`
+   - Recommended quote source policy:
+     - `enable_quote_from_offers=true` (quote RFQs only when a local Offer line matches)
+     - `enable_quote_from_rfqs=false` (do not quote arbitrary RFQs unless you explicitly want to auto-accept any RFQ price/terms)
    - For stalled swaps in `waiting_terms`, tune worker `waiting_terms_*` options (bounded retry + timeout leave) instead of adding client-side loops.
    - For deterministic `ln_pay` fail cleanup, tune:
      - `ln_pay_fail_leave_attempts`

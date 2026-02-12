@@ -966,6 +966,9 @@ test('e2e: prompt tool offer_post broadcasts swap.svc_announce', async (t) => {
           auto_approve_default: false,
           max_steps: 4,
           max_repairs: 0,
+          // This test validates offer_post broadcasting; disable tradeauto autostart to avoid
+          // clobbering sidechannel subscriptions during swarm discovery under full-suite load.
+          tradeauto_autostart: false,
         },
         sc_bridge: { url: `ws://127.0.0.1:${announcerPort}`, token: announcerToken },
         receipts: { db: `onchain/receipts/e2e-offer-post-${runId}.sqlite` },
@@ -1040,45 +1043,65 @@ test('e2e: prompt tool offer_post broadcasts swap.svc_announce', async (t) => {
     label: 'observe offer svc_announce',
   });
 
-  const events = await readNdjsonUntilFinal({
-    url: `${base}/v1/run/stream`,
-    headers: authHeaders,
-    body: {
-      prompt: JSON.stringify({
-        type: 'tool',
-        name: 'intercomswap_offer_post',
-        arguments: {
-          channels: [channel],
-          name: `maker:${runId}`,
-          rfq_channels: [channel],
-          ttl_sec: 30,
-          offers: [
-            {
-              pair: 'BTC_LN/USDT_SOL',
-              have: 'USDT_SOL',
-              want: 'BTC_LN',
-              btc_sats: 10000,
-              usdt_amount: '1000000',
-              max_platform_fee_bps: 500,
-              max_trade_fee_bps: 1000,
-              max_total_fee_bps: 1500,
-              min_sol_refund_window_sec: 72 * 3600,
-              max_sol_refund_window_sec: 7 * 24 * 3600,
+  // Sidechannels are unbuffered: even with joins in place, a single broadcast can still miss.
+  // Re-post the offer periodically until observed to avoid flakes (this matches real svc_announce behavior).
+  let offerPostedOk = false;
+  let offerResenderStop = false;
+  let offerResenderBusy = false;
+  const postOfferOnce = async () => {
+    if (offerResenderStop) return;
+    if (offerResenderBusy) return;
+    offerResenderBusy = true;
+    try {
+      const events = await readNdjsonUntilFinal({
+        url: `${base}/v1/run/stream`,
+        headers: authHeaders,
+        body: {
+          prompt: JSON.stringify({
+            type: 'tool',
+            name: 'intercomswap_offer_post',
+            arguments: {
+              channels: [channel],
+              name: `maker:${runId}`,
+              rfq_channels: [channel],
+              ttl_sec: 30,
+              offers: [
+                {
+                  pair: 'BTC_LN/USDT_SOL',
+                  have: 'USDT_SOL',
+                  want: 'BTC_LN',
+                  btc_sats: 10000,
+                  usdt_amount: '1000000',
+                  max_platform_fee_bps: 500,
+                  max_trade_fee_bps: 1000,
+                  max_total_fee_bps: 1500,
+                  min_sol_refund_window_sec: 72 * 3600,
+                  max_sol_refund_window_sec: 7 * 24 * 3600,
+                },
+              ],
             },
-          ],
+          }),
+          session_id: `e2e-offer-post-${runId}`,
+          auto_approve: true,
+          dry_run: false,
+          max_steps: 1,
         },
-      }),
-      session_id: `e2e-offer-post-${runId}`,
-      auto_approve: true,
-      dry_run: false,
-      max_steps: 1,
-    },
-    timeoutMs: 30_000,
-  });
-  const final = events.findLast((e) => e && typeof e === 'object' && e.type === 'final');
-  assert.equal(final?.content_json?.type, 'offer_posted');
+        timeoutMs: 30_000,
+      });
+      const final = events.findLast((e) => e && typeof e === 'object' && e.type === 'final');
+      if (final?.content_json?.type === 'offer_posted') offerPostedOk = true;
+    } catch (_e) {
+      // Best-effort: keep trying until offer is observed or test times out.
+    } finally {
+      offerResenderBusy = false;
+    }
+  };
+  await postOfferOnce();
+  const offerResender = setInterval(() => void postOfferOnce(), 1500);
+  t.after(() => clearInterval(offerResender));
 
   await offerWait;
+  assert.equal(offerPostedOk, true);
 
   preflightStop = true;
   clearInterval(preflightResender);

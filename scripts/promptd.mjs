@@ -345,7 +345,9 @@ async function main() {
           trace_enabled: tradeAutoBootstrap.traceEnabled,
           ln_liquidity_mode: 'aggregate',
           enable_quote_from_offers: true,
-          enable_quote_from_rfqs: true,
+          // Safety default: only quote RFQs when they match a local Offer line.
+          // enable_quote_from_rfqs would quote any RFQ even without a local offer match.
+          enable_quote_from_rfqs: false,
           enable_accept_quotes: true,
           enable_invite_from_accepts: true,
           enable_join_invites: true,

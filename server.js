@@ -1,143 +1,223 @@
 import express from "express";
-import bodyParser from "body-parser";
-import fetch from "node-fetch";
-import { ethers, Wallet } from "ethers";
-import { Connection } from "@solana/web3.js";
+import cors from "cors";
+import path from "path";
+import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import bs58 from "bs58";
+import {
+  Connection,
+  Keypair,
+  VersionedTransaction,
+} from "@solana/web3.js";
 
 dotenv.config();
 
 const app = express();
-app.use(bodyParser.json());
-app.use(express.static("public"));
+app.use(cors());
+app.use(express.json({ limit: "3mb" }));
 
-const PORT = 3000;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// ================= CONFIG =================
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const PORT = process.env.PORT || 3000;
 
-const EVM_RPC = "https://rpc.ankr.com/eth";
-const SOL_RPC = "https://api.mainnet-beta.solana.com";
+// ===== SOLANA CONFIG =====
+const SOL_RPC = process.env.SOL_RPC || "https://api.mainnet-beta.solana.com";
+const solConn = new Connection(SOL_RPC, "confirmed");
 
-const provider = new ethers.JsonRpcProvider(EVM_RPC);
-const connection = new Connection(SOL_RPC);
+// ===== OPTIONAL API KEY (recommended) =====
+const API_KEY = (process.env.API_KEY || "").trim();
 
-// ================= WALLET =================
-let CURRENT_WALLET = null;
+// ===== IN-MEMORY SOL WALLET (RUNTIME SETUP) =====
+let SOL_KP = null;
 
-// generate wallet
-app.get("/generate-wallet", (req, res) => {
-  const wallet = Wallet.createRandom();
-  CURRENT_WALLET = wallet;
-
-  res.json({
-    address: wallet.address,
-    privateKey: wallet.privateKey
-  });
-});
-
-// set wallet from PK
-app.post("/set-wallet", (req, res) => {
-  const { privateKey } = req.body;
-
-  try {
-    const wallet = new Wallet(privateKey, provider);
-    CURRENT_WALLET = wallet;
-
-    res.json({ address: wallet.address });
-  } catch {
-    res.json({ error: "Invalid private key" });
+// ---------------- Helpers ----------------
+function ok(res, data) {
+  res.json({ ok: true, ...data });
+}
+function fail(res, msg, extra = {}) {
+  res.status(400).json({ ok: false, error: msg, ...extra });
+}
+function mask(addr) {
+  if (!addr) return "";
+  return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+}
+function requireApiKey(req, res) {
+  if (!API_KEY) return true; // unlocked if not set
+  const got = req.headers["x-api-key"];
+  if (got !== API_KEY) {
+    res
+      .status(401)
+      .json({ ok: false, error: "Unauthorized (missing/invalid x-api-key)" });
+    return false;
   }
-});
+  return true;
+}
+function parseSolSecret(secretRaw) {
+  const s = String(secretRaw || "").trim();
+  if (!s) throw new Error("Secret key kosong");
 
-// ================= AI =================
-async function aiDecision(token) {
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${GROQ_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "llama3-70b-8192",
-      messages: [
-        {
-          role: "user",
-          content: `Analyze ${token}. Answer BUY / SELL / SKIP`
-        }
-      ]
-    })
-  });
+  // JSON array: [12,34,...]
+  if (s.startsWith("[")) {
+    const arr = JSON.parse(s);
+    const u8 = Uint8Array.from(arr);
+    return Keypair.fromSecretKey(u8);
+  }
 
-  const data = await res.json();
-  return data.choices[0].message.content;
+  // Base58 string
+  const u8 = bs58.decode(s);
+  return Keypair.fromSecretKey(u8);
 }
 
-// ================= BALANCE =================
-app.get("/balance", async (req, res) => {
+// serve UI
+app.use(express.static(path.join(__dirname, "public")));
+
+// ---------------- Status ----------------
+app.get("/api/health", (_req, res) => {
+  ok(res, {
+    status: "up",
+    solRpc: SOL_RPC,
+    apiKeyEnabled: !!API_KEY,
+    hasSolWallet: !!SOL_KP,
+    address: SOL_KP ? SOL_KP.publicKey.toBase58() : null,
+  });
+});
+
+app.get("/api/sol/status", (_req, res) => {
+  ok(res, {
+    rpc: SOL_RPC,
+    apiKeyEnabled: !!API_KEY,
+    hasWallet: !!SOL_KP,
+    address: SOL_KP ? SOL_KP.publicKey.toBase58() : null,
+    addressMasked: SOL_KP ? mask(SOL_KP.publicKey.toBase58()) : null,
+    note: SOL_KP
+      ? "Wallet aktif (disimpan RAM)."
+      : "Wallet belum diset. Paste secret di UI > Set Wallet.",
+  });
+});
+
+// ---------------- Setup/Clear wallet ----------------
+app.post("/api/sol/setup", (req, res) => {
+  if (!requireApiKey(req, res)) return;
+
   try {
-    if (!CURRENT_WALLET) {
-      return res.json({ error: "Set wallet first" });
-    }
+    const secret = req.body?.secret;
+    const kp = parseSolSecret(secret);
+    SOL_KP = kp;
 
-    const evmBal = await provider.getBalance(CURRENT_WALLET.address);
-
-    res.json({
-      address: CURRENT_WALLET.address,
-      evm: ethers.formatEther(evmBal)
+    const address = kp.publicKey.toBase58();
+    ok(res, {
+      address,
+      addressMasked: mask(address),
+      note: "SOL wallet terset (disimpan di RAM). Restart server = set ulang.",
     });
   } catch (e) {
-    res.json({ error: e.message });
+    fail(res, e.message || "Gagal setup SOL wallet");
   }
 });
 
-// ================= SWAP =================
-app.post("/swap-evm", async (req, res) => {
+app.post("/api/sol/clear", (req, res) => {
+  if (!requireApiKey(req, res)) return;
+  SOL_KP = null;
+  ok(res, { note: "SOL wallet dihapus dari memory." });
+});
+
+// ---------------- Balance ----------------
+app.get("/api/sol/balance", async (req, res) => {
+  if (!requireApiKey(req, res)) return;
+
   try {
-    if (!CURRENT_WALLET) {
-      return res.json({ error: "Set wallet first" });
+    if (!SOL_KP)
+      return fail(res, "SOL wallet belum diset. Setup dulu di UI.");
+
+    const lamports = await solConn.getBalance(SOL_KP.publicKey, "confirmed");
+    ok(res, {
+      address: SOL_KP.publicKey.toBase58(),
+      sol: lamports / 1e9,
+      lamports,
+    });
+  } catch (e) {
+    fail(res, e.message || "Gagal ambil SOL balance");
+  }
+});
+
+// ---------------- Jupiter SWAP EXECUTE (server signs) ----------------
+// inputMint/outputMint: mint address
+// amount: base units (lamports utk SOL/wSOL, atau token base units)
+// slippageBps: default 50 (0.5%)
+app.post("/api/sol/swap-execute", async (req, res) => {
+  if (!requireApiKey(req, res)) return;
+
+  try {
+    if (!SOL_KP)
+      return fail(res, "SOL wallet belum diset. Setup dulu di UI.");
+
+    const { inputMint, outputMint, amount, slippageBps = 50 } = req.body || {};
+    if (!inputMint || !outputMint)
+      return fail(res, "inputMint/outputMint kosong");
+    if (!amount) return fail(res, "amount kosong (base units/lamports)");
+
+    const userPublicKey = SOL_KP.publicKey.toBase58();
+
+    // 1) Quote
+    const qUrl = new URL("https://quote-api.jup.ag/v6/quote");
+    qUrl.searchParams.set("inputMint", inputMint);
+    qUrl.searchParams.set("outputMint", outputMint);
+    qUrl.searchParams.set("amount", String(amount));
+    qUrl.searchParams.set("slippageBps", String(slippageBps));
+
+    const quoteRes = await fetch(qUrl.toString());
+    const quoteJson = await quoteRes.json();
+
+    if (!quoteJson?.routePlan) {
+      return fail(res, "Quote gagal / pair tidak ditemukan", { raw: quoteJson });
     }
 
-    const r = await fetch("https://li.quest/v1/quote", {
+    // 2) Build swap tx
+    const swapRes = await fetch("https://quote-api.jup.ag/v6/swap", {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        fromChain: 1,
-        toChain: 1,
-        fromToken: "USDC",
-        toToken: "ETH",
-        fromAmount: "1000000",
-        fromAddress: CURRENT_WALLET.address
-      })
+        quoteResponse: quoteJson,
+        userPublicKey,
+        wrapAndUnwrapSol: true,
+        dynamicComputeUnitLimit: true,
+      }),
     });
 
-    const data = await r.json();
-    const tx = data.transactionRequest;
+    const swapJson = await swapRes.json();
+    if (!swapJson?.swapTransaction) {
+      return fail(res, "Swap TX gagal dibuat", { raw: swapJson });
+    }
 
-    const txResponse = await CURRENT_WALLET.sendTransaction({
-      to: tx.to,
-      data: tx.data,
-      value: tx.value
+    // 3) Deserialize -> sign -> broadcast
+    const txBytes = Buffer.from(swapJson.swapTransaction, "base64");
+    const vtx = VersionedTransaction.deserialize(txBytes);
+
+    vtx.sign([SOL_KP]);
+
+    const sig = await solConn.sendRawTransaction(vtx.serialize(), {
+      skipPreflight: false,
+      maxRetries: 3,
     });
 
-    res.json({ tx: txResponse.hash });
+    const conf = await solConn.confirmTransaction(sig, "confirmed");
 
+    ok(res, {
+      signature: sig,
+      confirmation: conf?.value || null,
+      quote: {
+        inAmount: quoteJson.inAmount,
+        outAmount: quoteJson.outAmount,
+        priceImpactPct: quoteJson.priceImpactPct,
+      },
+      note: "EXECUTED: tx ditandatangani server + broadcast ke jaringan.",
+    });
   } catch (e) {
-    res.json({ error: e.message });
+    fail(res, e.message || "Swap execute error");
   }
 });
 
-// ================= AUTO TRADE =================
-app.post("/auto-trade", async (req, res) => {
-  try {
-    const decision = await aiDecision("ETH");
-    res.json({ decision });
-  } catch (e) {
-    res.json({ error: e.message });
-  }
-});
-
-// ================= START =================
 app.listen(PORT, () => {
-  console.log(`🚀 RUNNING http://localhost:${PORT}`);
+  console.log(`✅ Running on http://0.0.0.0:${PORT}`);
 });

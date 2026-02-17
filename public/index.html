@@ -7,16 +7,16 @@
 <body>
 
 <div class="container">
-  <h1>🚀 Trading Agent Dashboard</h1>
+  <h1>🚀 Trading Agent</h1>
 
-  <input id="token" placeholder="Token (ETH/SOL)" />
+  <input id="pk" placeholder="Paste Private Key" />
 
   <div class="buttons">
-    <button onclick="runAI()">AI Analyze</button>
-    <button onclick="swap()">Swap</button>
+    <button onclick="setWallet()">Set Wallet</button>
+    <button onclick="generateWallet()">Generate Wallet</button>
     <button onclick="getBalance()">Balance</button>
-    <button onclick="trending()">Trending</button>
-    <button onclick="autoTrade()">Auto Trade</button>
+    <button onclick="swap()">Swap</button>
+    <button onclick="autoTrade()">AI Trade</button>
   </div>
 
   <div id="output"></div>

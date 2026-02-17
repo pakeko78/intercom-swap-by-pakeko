@@ -1,46 +1,65 @@
-async function setWallet() {
-  const pk = document.getElementById("pk").value;
+const out = document.getElementById("out");
+const apikey = document.getElementById("apikey");
+const secret = document.getElementById("secret");
 
-  const res = await fetch("/set-wallet", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({ privateKey: pk })
+function log(x){
+  out.textContent = typeof x === "string" ? x : JSON.stringify(x, null, 2);
+}
+
+async function req(url, method = "GET", body) {
+  const headers = { "Content-Type": "application/json" };
+  const key = apikey.value.trim();
+  if (key) headers["x-api-key"] = key;
+
+  const r = await fetch(url, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined
   });
 
-  const data = await res.json();
-
-  document.getElementById("output").innerText =
-    data.address || data.error;
+  return r.json().catch(() => ({ ok:false, error:"Invalid JSON response" }));
 }
 
-async function generateWallet() {
-  const res = await fetch("/generate-wallet");
-  const data = await res.json();
-
-  document.getElementById("output").innerText =
-    `Address: ${data.address}\nPK: ${data.privateKey}`;
+async function status() {
+  const r = await req("/api/sol/status");
+  log(r);
 }
 
-async function getBalance() {
-  const res = await fetch("/balance");
-  const data = await res.json();
+async function setup() {
+  const r = await req("/api/sol/setup", "POST", { secret: secret.value });
+  log(r);
+}
 
-  document.getElementById("output").innerText =
-    data.evm ? `Balance: ${data.evm} ETH` : data.error;
+async function clearWallet() {
+  const r = await req("/api/sol/clear", "POST", {});
+  log(r);
+}
+
+async function balance() {
+  const r = await req("/api/sol/balance");
+  log(r);
 }
 
 async function swap() {
-  const res = await fetch("/swap-evm", { method: "POST" });
-  const data = await res.json();
+  const inputMint = document.getElementById("inMint").value.trim();
+  const outputMint = document.getElementById("outMint").value.trim();
+  const amount = document.getElementById("amount").value.trim();
+  const slippageBps = Number(document.getElementById("slip").value.trim() || "50");
 
-  document.getElementById("output").innerText =
-    data.tx || data.error;
+  const r = await req("/api/sol/swap-execute", "POST", {
+    inputMint,
+    outputMint,
+    amount,
+    slippageBps
+  });
+
+  log(r);
 }
 
-async function autoTrade() {
-  const res = await fetch("/auto-trade", { method: "POST" });
-  const data = await res.json();
+window.status = status;
+window.setup = setup;
+window.clearWallet = clearWallet;
+window.balance = balance;
+window.swap = swap;
 
-  document.getElementById("output").innerText =
-    data.decision || data.error;
-}
+status();

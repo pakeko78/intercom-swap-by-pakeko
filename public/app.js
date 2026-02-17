@@ -1,24 +1,24 @@
-async function runAI() {
-  const token = document.getElementById("token").value;
+async function setWallet() {
+  const pk = document.getElementById("pk").value;
 
-  const res = await fetch("/ai", {
+  const res = await fetch("/set-wallet", {
     method: "POST",
     headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({ token })
+    body: JSON.stringify({ privateKey: pk })
   });
 
   const data = await res.json();
 
   document.getElementById("output").innerText =
-    "AI: " + data.decision;
+    data.address || data.error;
 }
 
-async function swap() {
-  const res = await fetch("/swap-evm", { method: "POST" });
+async function generateWallet() {
+  const res = await fetch("/generate-wallet");
   const data = await res.json();
 
   document.getElementById("output").innerText =
-    "TX: " + (data.tx || data.error);
+    `Address: ${data.address}\nPK: ${data.privateKey}`;
 }
 
 async function getBalance() {
@@ -26,15 +26,15 @@ async function getBalance() {
   const data = await res.json();
 
   document.getElementById("output").innerText =
-    `EVM: ${data.evm} ETH | SOL: ${data.sol}`;
+    data.evm ? `Balance: ${data.evm} ETH` : data.error;
 }
 
-async function trending() {
-  const res = await fetch("/trending");
+async function swap() {
+  const res = await fetch("/swap-evm", { method: "POST" });
   const data = await res.json();
 
   document.getElementById("output").innerText =
-    "🔥 " + data[0].baseToken.symbol;
+    data.tx || data.error;
 }
 
 async function autoTrade() {
@@ -42,5 +42,5 @@ async function autoTrade() {
   const data = await res.json();
 
   document.getElementById("output").innerText =
-    "AI Decision: " + data.decision;
+    data.decision || data.error;
 }

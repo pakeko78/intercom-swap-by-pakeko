@@ -1,546 +1,303 @@
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import bs58 from 'bs58';
-import { ethers } from 'ethers';
-import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '2mb' }));
-app.use(express.static('public'));
+app.use(express.json({ limit: "1mb" }));
 
-const API_KEY = process.env.API_KEY || '';
-const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+/**
+ * 🔒 SECURITY DEFAULT:
+ * - binds to 127.0.0.1 (private) so NOT accessible via public IP:3000
+ * - if you want public, set HOST=0.0.0.0 (not recommended)
+ */
+const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || "127.0.0.1";
 
-// ✅ default model baru (biar gak 400 model decommissioned)
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+// Optional API key gate for sensitive endpoints (wallet actions)
+const API_KEY = process.env.API_KEY || "";
 
-const RPC_ETH = process.env.EVM_RPC_ETH || '';
-const RPC_BSC = process.env.EVM_RPC_BSC || '';
-const RPC_BASE = process.env.EVM_RPC_BASE || '';
-const SOL_RPC = process.env.SOL_RPC || 'https://api.mainnet-beta.solana.com';
-const ZEROX_API_KEY = process.env.ZEROX_API_KEY || '';
-
-const CHAIN = {
-  eth: { chainId: 1, name: 'Ethereum', rpc: RPC_ETH, native: 'ETH' },
-  bsc: { chainId: 56, name: 'BSC', rpc: RPC_BSC, native: 'BNB' },
-  base: { chainId: 8453, name: 'Base', rpc: RPC_BASE, native: 'ETH' }
-};
-
-function requireApiKey(req) {
-  if (!API_KEY) return true;
-  const k = req.headers['x-api-key'];
-  return k && k === API_KEY;
+function requireKey(req, res, next) {
+  if (!API_KEY) return next(); // if no key set, allow
+  const key = req.headers["x-api-key"];
+  if (key && String(key) === String(API_KEY)) return next();
+  return res.status(401).json({ ok: false, error: "unauthorized" });
 }
 
-function maskAddr(a) {
-  if (!a) return null;
-  return a.length <= 10 ? a : `${a.slice(0, 6)}…${a.slice(-4)}`;
+// Serve UI (simple proof dashboard)
+app.use(express.static("public"));
+
+// ===== In-memory state (RAM only, resets on restart) =====
+let SOL_WALLET = null; // { secret: string, loadedAt }
+let EVM_WALLET = null; // { privateKey: string, loadedAt }
+
+const WATCHLIST = new Map(); // address -> { address, note, addedAt }
+
+// ===== HEALTH =====
+app.get("/api/health", (req, res) => res.json({ ok: true, status: "online" }));
+
+// ===== SOL SETUP (protected) =====
+app.post("/api/sol/setup", requireKey, (req, res) => {
+  const secret = String(req.body?.secret || "").trim();
+  if (!secret) return res.status(400).json({ ok: false, error: "missing_secret" });
+  SOL_WALLET = { secret, loadedAt: Date.now() };
+  res.json({ ok: true, status: "sol_wallet_loaded" });
+});
+
+app.post("/api/sol/clear", requireKey, (req, res) => {
+  SOL_WALLET = null;
+  res.json({ ok: true, status: "sol_wallet_cleared" });
+});
+
+app.get("/api/sol/status", requireKey, (req, res) => {
+  res.json({ ok: true, loaded: !!SOL_WALLET, loadedAt: SOL_WALLET?.loadedAt || null });
+});
+
+// ===== EVM SETUP (protected) =====
+app.post("/api/evm/setup", requireKey, (req, res) => {
+  const privateKey = String(req.body?.privateKey || "").trim();
+  if (!privateKey) return res.status(400).json({ ok: false, error: "missing_privateKey" });
+  EVM_WALLET = { privateKey, loadedAt: Date.now() };
+  res.json({ ok: true, status: "evm_wallet_loaded" });
+});
+
+app.post("/api/evm/clear", requireKey, (req, res) => {
+  EVM_WALLET = null;
+  res.json({ ok: true, status: "evm_wallet_cleared" });
+});
+
+app.get("/api/evm/status", requireKey, (req, res) => {
+  res.json({ ok: true, loaded: !!EVM_WALLET, loadedAt: EVM_WALLET?.loadedAt || null });
+});
+
+// ===== TOKEN TRACK (PUBLIC) =====
+async function fetchDexToken(address) {
+  const url = `https://api.dexscreener.com/latest/dex/tokens/${encodeURIComponent(address)}`;
+  const r = await fetch(url);
+  const j = await r.json();
+  const pairs = Array.isArray(j?.pairs) ? j.pairs : [];
+  return pairs;
 }
 
-function isEvmAddress(x) {
-  return typeof x === 'string' && /^0x[a-fA-F0-9]{40}$/.test(x.trim());
-}
-function isProbablySolAddress(x) {
-  return typeof x === 'string' && x.trim().length >= 32 && x.trim().length <= 50 && !x.trim().startsWith('0x');
+function pickBestPair(pairs) {
+  if (!pairs.length) return null;
+  return pairs
+    .slice()
+    .sort((a, b) => Number(b?.liquidity?.usd || 0) - Number(a?.liquidity?.usd || 0))[0];
 }
 
-function parseSolSecret(input) {
-  const s = (input || '').trim();
-  if (!s) throw new Error('Empty SOL secret');
-  if (s.startsWith('[')) {
-    const arr = JSON.parse(s);
-    if (!Array.isArray(arr)) throw new Error('Invalid JSON array');
-    return Keypair.fromSecretKey(Uint8Array.from(arr));
+app.get("/api/token/track", async (req, res) => {
+  try {
+    const address = String(req.query.address || "").trim();
+    if (!address) return res.status(400).json({ ok: false, error: "address_required" });
+
+    const pairs = await fetchDexToken(address);
+    const best = pickBestPair(pairs);
+
+    if (!best) return res.json({ ok: true, found: false, address, pairs: [] });
+
+    res.json({
+      ok: true,
+      found: true,
+      address,
+      chainId: best.chainId,
+      dexId: best.dexId,
+      pairAddress: best.pairAddress,
+      baseToken: best.baseToken,
+      quoteToken: best.quoteToken,
+      priceUsd: best.priceUsd,
+      liquidityUsd: best?.liquidity?.usd,
+      volume24h: best?.volume?.h24,
+      priceChange24h: best?.priceChange?.h24,
+      fdv: best?.fdv,
+      url: best?.url
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: "track_failed", message: String(e?.message || e) });
   }
-  const bytes = bs58.decode(s);
-  return Keypair.fromSecretKey(bytes);
-}
+});
 
-function parseEvmPk(input) {
-  const s = (input || '').trim();
-  if (!s) throw new Error('Empty EVM private key');
-  const pk = s.startsWith('0x') ? s : `0x${s}`;
-  if (!/^0x[a-fA-F0-9]{64}$/.test(pk)) throw new Error('Invalid EVM private key format');
-  return pk;
-}
+// ===== TOKEN ANALYZE (PUBLIC) =====
+function calcRisk(best) {
+  const liq = Number(best?.liquidity?.usd || 0);
+  const vol24 = Number(best?.volume?.h24 || 0);
+  const change24 = Number(best?.priceChange?.h24 || 0);
+  const fdv = Number(best?.fdv || 0);
 
-// RAM-only wallets
-const mem = {
-  sol: { kp: null, address: null },
-  evm: {
-    eth: { wallet: null, address: null },
-    bsc: { wallet: null, address: null },
-    base: { wallet: null, address: null }
-  }
-};
+  let score = 0;
+  const reasons = [];
 
-function getProvider(chainKey) {
-  const c = CHAIN[chainKey];
-  if (!c?.rpc) throw new Error(`Missing RPC for ${chainKey}`);
-  return new ethers.JsonRpcProvider(c.rpc, c.chainId);
-}
+  // Liquidity
+  if (liq < 2000) { score += 35; reasons.push("Liquidity very low (<$2k)"); }
+  else if (liq < 10000) { score += 20; reasons.push("Liquidity low (<$10k)"); }
+  else if (liq < 50000) { score += 10; reasons.push("Liquidity moderate (<$50k)"); }
 
-function riskGate({ chain, amountInHuman, slippageBps, mode }) {
-  const issues = [];
-  const warnings = [];
+  // Volume
+  if (vol24 < 1000) { score += 15; reasons.push("Volume 24h very low (<$1k)"); }
+  else if (vol24 < 10000) { score += 8; reasons.push("Volume 24h low (<$10k)"); }
 
-  const amt = Number(amountInHuman);
-  const slip = Number(slippageBps);
+  // Volatility
+  if (Math.abs(change24) >= 80) { score += 15; reasons.push("Extreme 24h move (>=80%)"); }
+  else if (Math.abs(change24) >= 40) { score += 8; reasons.push("High 24h move (>=40%)"); }
 
-  if (!Number.isFinite(amt) || amt <= 0) issues.push('Amount must be > 0');
-  if (!Number.isFinite(slip) || slip <= 0) warnings.push('Slippage not set/invalid. Try 50–150 bps.');
-  if (slip > 300) warnings.push('High slippage (>3%) — higher MEV/sandwich risk.');
-
-  if (chain === 'sol' && amt >= 1) warnings.push('Large SOL amount — start small, use burner wallet.');
-  if ((chain === 'eth' || chain === 'base') && amt >= 0.2) warnings.push('Large amount — do a tiny test tx first.');
-  if (chain === 'bsc' && amt >= 1) warnings.push('Large amount — do a tiny test tx first.');
-
-  if (mode === 'bridge') warnings.push('Bridge risk: route failures/delays/extra fees.');
-
-  return { ok: issues.length === 0, issues, warnings };
-}
-
-async function groqParse(userText) {
-  if (!GROQ_API_KEY) {
-    return {
-      intent: 'unknown',
-      chain: null,
-      action: null,
-      tokenIn: null,
-      tokenOut: null,
-      amount: null,
-      slippageBps: 100,
-      notes: ['GROQ_API_KEY not set — fallback detectors only.']
-    };
+  // FDV / Liquidity heuristic
+  if (fdv > 0 && liq > 0) {
+    const ratio = fdv / liq;
+    if (ratio > 500) { score += 20; reasons.push("FDV/Liquidity very high (>500x)"); }
+    else if (ratio > 200) { score += 12; reasons.push("FDV/Liquidity high (>200x)"); }
+    else if (ratio > 100) { score += 6; reasons.push("FDV/Liquidity elevated (>100x)"); }
   }
 
-  const sys = `Return ONLY valid JSON with keys:
-intent: "swap"|"bridge"|"balance"|"status"|"help"|"unknown"
-chain: "sol"|"eth"|"bsc"|"base"|null
-tokenIn: string|null
-tokenOut: string|null
-amount: string|null
-slippageBps: number
-action: "execute_swap"|"execute_bridge"|"show_balance"|"quote"|"unknown"
-notes: array of strings
-Rules:
-- If you see 0x... address, assume EVM token.
-- If you see Solana mint/address, assume sol.
-- If chain missing for EVM, set chain null.
-- slippageBps clamp 10..500
-No extra text.`;
+  score = Math.max(0, Math.min(100, score));
 
-  const body = {
-    model: GROQ_MODEL,
-    messages: [
-      { role: 'system', content: sys },
-      { role: 'user', content: userText }
-    ],
-    temperature: 0.2
+  let grade = "LOW";
+  if (score >= 70) grade = "HIGH";
+  else if (score >= 40) grade = "MEDIUM";
+
+  const blocked = grade === "HIGH";
+  const gate = blocked ? "BLOCKED" : (grade === "MEDIUM" ? "WARN" : "PASS");
+
+  return {
+    score,
+    grade,
+    gate,
+    blocked,
+    reasons,
+    metrics: { liquidityUsd: liq, volume24h: vol24, priceChange24h: change24, fdv }
   };
-
-  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${GROQ_API_KEY}`
-    },
-    body: JSON.stringify(body)
-  });
-
-  if (!r.ok) {
-    const t = await r.text().catch(() => '');
-    throw new Error(`Groq error: ${r.status} ${t}`);
-  }
-
-  const j = await r.json();
-  const content = j?.choices?.[0]?.message?.content?.trim() || '';
-  return JSON.parse(content);
 }
 
-/* ================= API ================= */
-
-app.get('/api/health', (req, res) => {
-  res.json({
-    ok: true,
-    apiKeyEnabled: !!API_KEY,
-    groq: !!GROQ_API_KEY,
-    groqModel: GROQ_MODEL,
-    rpc: {
-      sol: SOL_RPC,
-      eth: !!RPC_ETH,
-      bsc: !!RPC_BSC,
-      base: !!RPC_BASE
-    },
-    wallets: {
-      sol: !!mem.sol.kp,
-      eth: !!mem.evm.eth.wallet,
-      bsc: !!mem.evm.bsc.wallet,
-      base: !!mem.evm.base.wallet
-    }
-  });
-});
-
-/* -------- Generate burner wallets -------- */
-app.post('/api/gen/sol', (req, res) => {
-  if (!requireApiKey(req)) return res.status(401).json({ ok: false, error: 'Unauthorized (x-api-key)' });
+app.get("/api/token/analyze", async (req, res) => {
   try {
-    const kp = Keypair.generate();
-    res.json({
-      ok: true,
-      address: kp.publicKey.toBase58(),
-      secretJson: JSON.stringify(Array.from(kp.secretKey)),
-      secretBase58: bs58.encode(kp.secretKey)
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
+    const address = String(req.query.address || "").trim();
+    if (!address) return res.status(400).json({ ok: false, error: "address_required" });
 
-app.post('/api/gen/evm', (req, res) => {
-  if (!requireApiKey(req)) return res.status(401).json({ ok: false, error: 'Unauthorized (x-api-key)' });
-  try {
-    const w = ethers.Wallet.createRandom();
-    res.json({ ok: true, address: w.address, privateKey: w.privateKey });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
+    const pairs = await fetchDexToken(address);
+    const best = pickBestPair(pairs);
 
-/* -------- Wallet setup -------- */
-app.post('/api/wallet/sol', (req, res) => {
-  if (!requireApiKey(req)) return res.status(401).json({ ok: false, error: 'Unauthorized (x-api-key)' });
-  try {
-    const kp = parseSolSecret(req.body?.secret);
-    mem.sol.kp = kp;
-    mem.sol.address = kp.publicKey.toBase58();
-    res.json({ ok: true, address: mem.sol.address, addressMasked: maskAddr(mem.sol.address) });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
+    if (!best) return res.json({ ok: true, found: false, address });
 
-app.post('/api/wallet/evm', async (req, res) => {
-  if (!requireApiKey(req)) return res.status(401).json({ ok: false, error: 'Unauthorized (x-api-key)' });
-  try {
-    const chain = String(req.body?.chain || '').toLowerCase();
-    if (!CHAIN[chain]) throw new Error('Invalid chain (use eth/bsc/base)');
-    const pk = parseEvmPk(req.body?.privateKey);
-    const provider = getProvider(chain);
-    const wallet = new ethers.Wallet(pk, provider);
-
-    mem.evm[chain].wallet = wallet;
-    mem.evm[chain].address = await wallet.getAddress();
-
-    res.json({ ok: true, chain, address: mem.evm[chain].address, addressMasked: maskAddr(mem.evm[chain].address) });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-/* -------- Agent router (detect + risk) -------- */
-app.post('/api/agent', async (req, res) => {
-  try {
-    const text = String(req.body?.text || '').trim();
-    if (!text) {
-      return res.json({
-        ok: true,
-        route: { intent: 'unknown', chain: null },
-        risk: { ok: false, issues: ['Empty input'], warnings: [] }
-      });
-    }
-
-    const has0x = /0x[a-fA-F0-9]{40}/.test(text);
-    const maybeSol = isProbablySolAddress(text) || /So11111111111111111111111111111111111111112/.test(text);
-
-    let route;
-    try {
-      route = await groqParse(text);
-    } catch (e) {
-      route = {
-        intent: 'unknown',
-        chain: null,
-        action: null,
-        tokenIn: null,
-        tokenOut: null,
-        amount: null,
-        slippageBps: 100,
-        notes: [`Groq parse failed → fallback: ${e.message}`]
-      };
-    }
-
-    if (!route.chain) {
-      if (maybeSol) route.chain = 'sol';
-      else if (has0x) route.chain = 'base'; // default base
-    }
-
-    const slip = Math.min(500, Math.max(10, Number(route.slippageBps || 100)));
-    route.slippageBps = slip;
-
-    const mode = route.intent === 'bridge' ? 'bridge' : 'swap';
-    const amountGuess = route.amount || '0';
-
-    const risk = riskGate({
-      chain: route.chain || 'unknown',
-      amountInHuman: amountGuess,
-      slippageBps: slip,
-      mode
-    });
-
-    if (route.intent === 'swap' && route.chain && route.chain !== 'sol' && route.tokenOut && isEvmAddress(route.tokenOut)) {
-      risk.warnings.push('Unknown EVM token address — could be honeypot/tax/blacklist. Verify before executing.');
-    }
-
-    res.json({ ok: true, route, risk });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-/* ================= SOL (Jupiter Execute) ================= */
-
-app.get('/api/sol/balance', async (req, res) => {
-  try {
-    if (!mem.sol.kp) return res.status(400).json({ ok: false, error: 'SOL wallet not set' });
-    const conn = new Connection(SOL_RPC, 'confirmed');
-    const lamports = await conn.getBalance(mem.sol.kp.publicKey);
-    res.json({ ok: true, address: mem.sol.address, lamports, sol: lamports / 1e9 });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-app.post('/api/sol/swap', async (req, res) => {
-  if (!requireApiKey(req)) return res.status(401).json({ ok: false, error: 'Unauthorized (x-api-key)' });
-  try {
-    if (!mem.sol.kp) throw new Error('SOL wallet not set');
-
-    const { inputMint, outputMint, amountLamports, slippageBps } = req.body || {};
-    if (!inputMint || !outputMint) throw new Error('Missing mint(s)');
-    const amount = String(amountLamports || '').trim();
-    if (!/^\d+$/.test(amount)) throw new Error('amountLamports must be integer string');
-    const slip = Math.min(500, Math.max(10, Number(slippageBps || 100)));
-
-    const human = (Number(amount) / 1e9).toString();
-    const risk = riskGate({ chain: 'sol', amountInHuman: human, slippageBps: slip, mode: 'swap' });
-    if (!risk.ok) return res.status(400).json({ ok: false, error: 'Risk gate failed', risk });
-
-    const qUrl = new URL('https://quote-api.jup.ag/v6/quote');
-    qUrl.searchParams.set('inputMint', inputMint);
-    qUrl.searchParams.set('outputMint', outputMint);
-    qUrl.searchParams.set('amount', amount);
-    qUrl.searchParams.set('slippageBps', String(slip));
-
-    const qRes = await fetch(qUrl.toString());
-    const quote = await qRes.json();
-    if (!qRes.ok) throw new Error(`Jupiter quote failed: ${JSON.stringify(quote)}`);
-
-    const sRes = await fetch('https://quote-api.jup.ag/v6/swap', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        quoteResponse: quote,
-        userPublicKey: mem.sol.address,
-        wrapAndUnwrapSol: true,
-        dynamicComputeUnitLimit: true
-      })
-    });
-    const swapJson = await sRes.json();
-    if (!sRes.ok) throw new Error(`Jupiter swap build failed: ${JSON.stringify(swapJson)}`);
-
-    const txBuf = Buffer.from(swapJson.swapTransaction, 'base64');
-    const tx = VersionedTransaction.deserialize(txBuf);
-    tx.sign([mem.sol.kp]);
-
-    const conn = new Connection(SOL_RPC, 'confirmed');
-    const sig = await conn.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
-    const conf = await conn.confirmTransaction(sig, 'confirmed');
-
-    res.json({ ok: true, chain: 'sol', signature: sig, confirmation: conf, risk });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-/* ================= EVM SWAP (0x Execute) ================= */
-
-async function zeroXQuote({ chainKey, sellToken, buyToken, sellAmountWei, slippageBps }) {
-  const c = CHAIN[chainKey];
-  if (!c) throw new Error('Invalid chain');
-  const url = new URL('https://api.0x.org/swap/v1/quote');
-  url.searchParams.set('chainId', String(c.chainId));
-  url.searchParams.set('sellToken', sellToken);
-  url.searchParams.set('buyToken', buyToken);
-  url.searchParams.set('sellAmount', sellAmountWei);
-
-  const slipPct = Math.min(0.05, Math.max(0.001, Number(slippageBps || 100) / 10000));
-  url.searchParams.set('slippagePercentage', String(slipPct));
-
-  const headers = { 'content-type': 'application/json' };
-  if (ZEROX_API_KEY) headers['0x-api-key'] = ZEROX_API_KEY;
-
-  const r = await fetch(url.toString(), { headers });
-  const j = await r.json();
-  if (!r.ok) throw new Error(`0x quote failed: ${JSON.stringify(j)}`);
-  return j;
-}
-
-app.get('/api/evm/balance', async (req, res) => {
-  try {
-    const chain = String(req.query.chain || '').toLowerCase();
-    if (!CHAIN[chain]) throw new Error('Invalid chain');
-    const w = mem.evm[chain].wallet;
-    if (!w) throw new Error(`EVM wallet not set for ${chain}`);
-    const bal = await w.provider.getBalance(await w.getAddress());
-    res.json({ ok: true, chain, address: mem.evm[chain].address, nativeWei: bal.toString(), native: ethers.formatEther(bal) });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-app.post('/api/evm/swap', async (req, res) => {
-  if (!requireApiKey(req)) return res.status(401).json({ ok: false, error: 'Unauthorized (x-api-key)' });
-  try {
-    const { chain, sellToken, buyToken, sellAmountWei, slippageBps } = req.body || {};
-    const chainKey = String(chain || '').toLowerCase();
-    if (!CHAIN[chainKey]) throw new Error('Invalid chain (eth/bsc/base)');
-    const wallet = mem.evm[chainKey].wallet;
-    if (!wallet) throw new Error(`EVM wallet not set for ${chainKey}`);
-
-    if (!sellToken || !buyToken) throw new Error('Missing token(s)');
-    if (!/^\d+$/.test(String(sellAmountWei || ''))) throw new Error('sellAmountWei must be integer string');
-
-    const slip = Math.min(500, Math.max(10, Number(slippageBps || 100)));
-    const risk = riskGate({ chain: chainKey, amountInHuman: '0.1', slippageBps: slip, mode: 'swap' });
-    if (!risk.ok) return res.status(400).json({ ok: false, error: 'Risk gate failed', risk });
-
-    const quote = await zeroXQuote({
-      chainKey,
-      sellToken,
-      buyToken,
-      sellAmountWei: String(sellAmountWei),
-      slippageBps: slip
-    });
-
-    const isNativeSell = (sellToken || '').toUpperCase() === 'ETH' || (sellToken || '').toUpperCase() === 'BNB';
-    if (!isNativeSell && isEvmAddress(sellToken)) {
-      const erc20 = new ethers.Contract(
-        sellToken,
-        [
-          'function allowance(address owner, address spender) view returns (uint256)',
-          'function approve(address spender, uint256 value) returns (bool)'
-        ],
-        wallet
-      );
-      const owner = await wallet.getAddress();
-      const spender = quote.allowanceTarget;
-      const allowance = await erc20.allowance(owner, spender);
-      const need = BigInt(quote.sellAmount);
-      if (BigInt(allowance.toString()) < need) {
-        const txa = await erc20.approve(spender, need);
-        await txa.wait();
-      }
-    }
-
-    const tx = await wallet.sendTransaction({
-      to: quote.to,
-      data: quote.data,
-      value: quote.value ? BigInt(quote.value) : 0n,
-      gasLimit: quote.gas ? BigInt(quote.gas) : undefined
-    });
-    const receipt = await tx.wait();
+    const risk = calcRisk(best);
 
     res.json({
       ok: true,
-      chain: chainKey,
-      hash: tx.hash,
-      receipt: { status: receipt.status, blockNumber: receipt.blockNumber },
+      found: true,
+      address,
+      chainId: best.chainId,
+      dexId: best.dexId,
+      baseToken: best.baseToken,
+      quoteToken: best.quoteToken,
+      priceUsd: best.priceUsd,
+      url: best.url,
       risk
     });
   } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: "analyze_failed", message: String(e?.message || e) });
   }
 });
 
-/* ================= BRIDGE (EVM↔EVM via LI.FI) ================= */
+// ===== WATCHLIST (PUBLIC ADD/REMOVE OK, NO SECRETS) =====
+app.get("/api/watchlist", (req, res) => {
+  res.json({ ok: true, items: Array.from(WATCHLIST.values()) });
+});
 
-app.post('/api/bridge/evm', async (req, res) => {
-  if (!requireApiKey(req)) return res.status(401).json({ ok: false, error: 'Unauthorized (x-api-key)' });
+app.post("/api/watchlist/add", (req, res) => {
+  const address = String(req.body?.address || "").trim();
+  const note = String(req.body?.note || "").trim();
+  if (!address) return res.status(400).json({ ok: false, error: "address_required" });
+  WATCHLIST.set(address, { address, note, addedAt: Date.now() });
+  res.json({ ok: true, status: "added", address });
+});
+
+app.post("/api/watchlist/remove", (req, res) => {
+  const address = String(req.body?.address || "").trim();
+  if (!address) return res.status(400).json({ ok: false, error: "address_required" });
+  WATCHLIST.delete(address);
+  res.json({ ok: true, status: "removed", address });
+});
+
+// ===== AGENT ANALYZE (PUBLIC) =====
+// Parses text like: "swap 0.01 SOL to USDC slippage 100 bps"
+function parseAgentText(textRaw) {
+  const text = String(textRaw || "").toLowerCase();
+
+  // chain detect
+  let chain = "unknown";
+  if (text.includes("sol")) chain = "sol";
+  if (text.includes("base")) chain = "base";
+  if (text.includes("bsc")) chain = "bsc";
+  if (text.includes("eth")) chain = "eth";
+
+  // intent detect
+  let intent = "unknown";
+  if (text.includes("swap")) intent = "swap";
+  if (text.includes("bridge")) intent = "bridge";
+
+  // amount
+  let amount = null;
+  const amtMatch = text.match(/(\d+(\.\d+)?)/);
+  if (amtMatch) amount = Number(amtMatch[1]);
+
+  // slippage bps
+  let slippageBps = null;
+  const slpMatch = text.match(/slippage\s*(\d+)\s*bps/);
+  if (slpMatch) slippageBps = Number(slpMatch[1]);
+
+  // tokens (very simple heuristic)
+  // examples: "sol to usdc", "eth to usdc"
+  let fromToken = null;
+  let toToken = null;
+  const toMatch = text.match(/(\w+)\s+to\s+(\w+)/);
+  if (toMatch) {
+    fromToken = toMatch[1]?.toUpperCase();
+    toToken = toMatch[2]?.toUpperCase();
+  }
+
+  return { intent, chain, amount, slippageBps, fromToken, toToken };
+}
+
+app.post("/api/agent/analyze", async (req, res) => {
   try {
-    const { fromChain, toChain, fromToken, toToken, fromAmountWei, slippageBps } = req.body || {};
-    const a = String(fromChain || '').toLowerCase();
-    const b = String(toChain || '').toLowerCase();
-    if (!CHAIN[a] || !CHAIN[b]) throw new Error('Bridge supports only eth/bsc/base');
-    if (!/^\d+$/.test(String(fromAmountWei || ''))) throw new Error('fromAmountWei must be integer string');
+    const text = String(req.body?.text || "").trim();
+    if (!text) return res.status(400).json({ ok: false, error: "text_required" });
 
-    const wallet = mem.evm[a].wallet;
-    if (!wallet) throw new Error(`EVM wallet not set for ${a}`);
+    const parsed = parseAgentText(text);
 
-    const slip = Math.min(500, Math.max(10, Number(slippageBps || 100)));
-    const risk = riskGate({ chain: a, amountInHuman: '0.1', slippageBps: slip, mode: 'bridge' });
-    if (!risk.ok) return res.status(400).json({ ok: false, error: 'Risk gate failed', risk });
+    // Risk gate suggestions (not blocking unless missing amount)
+    const blocks = [];
+    const warns = [];
 
-    const rUrl = new URL('https://li.quest/v1/quote');
-    rUrl.searchParams.set('fromChain', String(CHAIN[a].chainId));
-    rUrl.searchParams.set('toChain', String(CHAIN[b].chainId));
-    rUrl.searchParams.set('fromToken', fromToken);
-    rUrl.searchParams.set('toToken', toToken);
-    rUrl.searchParams.set('fromAmount', String(fromAmountWei));
-    rUrl.searchParams.set('fromAddress', await wallet.getAddress());
-    rUrl.searchParams.set('slippage', String(Math.min(0.05, Math.max(0.001, slip / 10000))));
-
-    const q = await fetch(rUrl.toString());
-    const quote = await q.json();
-    if (!q.ok) throw new Error(`LI.FI quote failed: ${JSON.stringify(quote)}`);
-
-    const txReq = quote?.transactionRequest;
-    if (!txReq?.to || !txReq?.data) throw new Error('LI.FI missing transactionRequest');
-
-    if (isEvmAddress(fromToken) && quote?.estimate?.approvalAddress) {
-      const erc20 = new ethers.Contract(
-        fromToken,
-        ['function allowance(address owner, address spender) view returns (uint256)', 'function approve(address spender, uint256 value) returns (bool)'],
-        wallet
-      );
-      const owner = await wallet.getAddress();
-      const spender = quote.estimate.approvalAddress;
-      const allowance = await erc20.allowance(owner, spender);
-      const need = BigInt(fromAmountWei);
-      if (BigInt(allowance.toString()) < need) {
-        const txa = await erc20.approve(spender, need);
-        await txa.wait();
-      }
-    }
-
-    const tx = await wallet.sendTransaction({
-      to: txReq.to,
-      data: txReq.data,
-      value: txReq.value ? BigInt(txReq.value) : 0n
-    });
-    const receipt = await tx.wait();
+    if (!parsed.amount || parsed.amount <= 0) blocks.push("Amount must be > 0");
+    if (parsed.slippageBps != null && parsed.slippageBps > 300) warns.push("Slippage > 300 bps is very high");
+    if (parsed.intent === "bridge") warns.push("Bridge risk is higher than swaps. Start small.");
 
     res.json({
       ok: true,
-      mode: 'bridge',
-      fromChain: a,
-      toChain: b,
-      hash: tx.hash,
-      receipt: { status: receipt.status, blockNumber: receipt.blockNumber },
-      risk,
-      note: 'Bridge finality depends on route. Track on explorer / LI.FI.'
+      parsed,
+      gate: {
+        blocked: blocks.length > 0,
+        blocks,
+        warns
+      },
+      autofill: {
+        // these keys are meant for UI forms
+        chain: parsed.chain,
+        intent: parsed.intent,
+        amount: parsed.amount,
+        slippageBps: parsed.slippageBps ?? 100,
+        fromToken: parsed.fromToken,
+        toToken: parsed.toToken
+      }
     });
   } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: "agent_failed", message: String(e?.message || e) });
   }
 });
 
-/* ================= start ================= */
-
-const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || '0.0.0.0';
-
+// ===== START =====
 app.listen(PORT, HOST, () => {
-  console.log(`RUNNING http://${HOST}:${PORT}`);
+  console.log(`✅ ProMax API: http://${HOST}:${PORT}`);
+  console.log(`🔒 Default is PRIVATE (HOST=127.0.0.1). Use SSH tunnel from phone to access safely.`);
 });

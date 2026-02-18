@@ -32,6 +32,11 @@
     .ok{color:var(--ok)} .bad{color:var(--danger)}
     pre{margin:10px 0 0;background:#0c121c;border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:10px;overflow:auto;font-size:12px}
     .hide{display:none}
+    .inline{display:flex; gap:8px; align-items:center}
+    .eye{padding:10px 12px;border-radius:12px}
+    .warn{border:1px solid rgba(239,68,68,.35); background:rgba(239,68,68,.08); padding:10px; border-radius:12px; font-size:12px}
+    .good{border:1px solid rgba(34,197,94,.35); background:rgba(34,197,94,.08); padding:10px; border-radius:12px; font-size:12px}
+    .kbd{padding:2px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.10);font-size:12px;color:#cfe2ff}
   </style>
 </head>
 <body>
@@ -49,18 +54,29 @@
 
   <div class="row">
     <div class="card grow">
-      <h2>Security (Recommended)</h2>
-      <input id="apiKey" placeholder="x-api-key (set API_KEY in .env for public server)"/>
-      <div class="small" style="margin-top:8px">Tip: if server is public, set API_KEY and never paste main wallet keys.</div>
+      <h2>Security (Masked ***** + Save local)</h2>
+      <div class="inline">
+        <input id="apiKey" type="password" placeholder="x-api-key (matches API_KEY in .env)" />
+        <button class="ghost eye" onclick="toggleType('apiKey')">👁</button>
+      </div>
+      <div class="small" style="margin-top:8px">Tip: Public server? Keep <span class="kbd">API_KEY</span> ON. Use burner wallets only.</div>
+      <div class="small" style="margin-top:6px">API key auto-saved in your browser (localStorage).</div>
     </div>
 
     <div class="card grow">
-      <h2>Agent (Auto Detect + Risk)</h2>
-      <textarea id="agentInput" placeholder="Example: swap 0.01 ETH to USDC on base, slippage 100 bps&#10;or paste token address / mint / pair"></textarea>
+      <h2>Agent (Detect → Risk → Auto Fill)</h2>
+      <textarea id="agentInput" placeholder="Examples:
+swap 0.01 ETH to USDC on base slippage 100 bps
+bridge 0.02 ETH from eth to base
+swap SOL to USDC slippage 100 bps"></textarea>
+
       <div class="row" style="margin-top:10px">
         <button onclick="agentRun()">Analyze</button>
         <button class="ghost" onclick="fillDemo()">Demo</button>
+        <button class="ghost" onclick="applyRoute()">Apply to Forms</button>
       </div>
+
+      <div id="riskBox" class="warn hide"></div>
       <pre id="agentOut">{}</pre>
       <pre id="riskOut">{}</pre>
     </div>
@@ -76,8 +92,15 @@
   <!-- SOL -->
   <div class="row" id="tab-sol">
     <div class="card grow">
-      <h2>Setup SOL Wallet (RAM only)</h2>
-      <textarea id="solSecret" placeholder="Paste SOL secret key (JSON array or base58). Stored in RAM only."></textarea>
+      <h2>SOL Wallet (Masked secret + Generator)</h2>
+
+      <div class="row" style="margin-top:0">
+        <button class="ghost" onclick="genSolWallet()">Generate New SOL Wallet</button>
+        <button class="ghost" onclick="copyText('solSecret')">Copy Secret</button>
+      </div>
+
+      <textarea id="solSecret" style="-webkit-text-security: disc;" placeholder="Paste SOL secret (JSON array or base58). Stored in RAM only."></textarea>
+
       <div class="row" style="margin-top:10px">
         <button onclick="solSet()">Set Wallet</button>
         <button class="ghost" onclick="solBal()">Balance</button>
@@ -88,15 +111,15 @@
     <div class="card grow">
       <h2>Swap (Jupiter Execute)</h2>
       <div class="grid2">
-        <input id="solIn" value="So11111111111111111111111111111111111111112" placeholder="inputMint"/>
+        <input id="solIn" value="So11111111111111111111111111111111111111112" placeholder="inputMint (wSOL)"/>
         <input id="solOut" placeholder="outputMint (token mint)"/>
       </div>
       <div class="grid3" style="margin-top:10px">
-        <input id="solAmt" value="10000000" placeholder="amountLamports (e.g. 10000000 = 0.01 SOL)"/>
-        <input id="solSlip" value="100" placeholder="slippageBps (100 = 1%)"/>
-        <button class="danger" onclick="solSwap()">Execute</button>
+        <input id="solAmt" value="10000000" placeholder="amountLamports (10000000 = 0.01 SOL)"/>
+        <input id="solSlip" value="100" placeholder="slippageBps (100=1%)"/>
+        <button class="danger" onclick="solSwapGuard()">Execute</button>
       </div>
-      <div class="small" style="margin-top:8px">Start small. Slippage high increases sandwich risk.</div>
+      <div class="small" style="margin-top:8px">Agent risk gate will warn you before execution.</div>
       <pre id="solOutBox">{}</pre>
     </div>
   </div>
@@ -104,15 +127,26 @@
   <!-- EVM -->
   <div class="row hide" id="tab-evm">
     <div class="card grow">
-      <h2>Setup EVM Wallet (RAM only)</h2>
+      <h2>EVM Wallet (Masked PK + Generator)</h2>
+
+      <div class="row" style="margin-top:0">
+        <button class="ghost" onclick="genEvmWallet()">Generate New EVM Wallet</button>
+        <button class="ghost" onclick="copyText('evmPk')">Copy PK</button>
+      </div>
+
       <div class="grid2">
         <select id="evmChain">
+          <option value="base">BASE</option>
           <option value="eth">ETH</option>
           <option value="bsc">BSC</option>
-          <option value="base">BASE</option>
         </select>
-        <input id="evmPk" placeholder="Private key (0x… or hex)"/>
+
+        <div class="inline">
+          <input id="evmPk" type="password" placeholder="Private key (0x… or hex)"/>
+          <button class="ghost eye" onclick="toggleType('evmPk')">👁</button>
+        </div>
       </div>
+
       <div class="row" style="margin-top:10px">
         <button onclick="evmSet()">Set Wallet</button>
         <button class="ghost" onclick="evmBal()">Balance</button>
@@ -129,9 +163,9 @@
       <div class="grid3" style="margin-top:10px">
         <input id="evmSellAmt" placeholder="sellAmountWei (integer)"/>
         <input id="evmSlip" value="100" placeholder="slippageBps"/>
-        <button class="danger" onclick="evmSwap()">Execute</button>
+        <button class="danger" onclick="evmSwapGuard()">Execute</button>
       </div>
-      <div class="small" style="margin-top:8px">For ERC20 sells, approval is auto. For native sells use ETH (on eth/base) or BNB (on bsc).</div>
+      <div class="small" style="margin-top:8px">BSC native = <span class="kbd">BNB</span>, ETH/Base native = <span class="kbd">ETH</span>.</div>
       <pre id="evmOutBox">{}</pre>
     </div>
   </div>
@@ -143,8 +177,8 @@
       <div class="grid2">
         <select id="brFrom">
           <option value="eth">ETH</option>
-          <option value="bsc">BSC</option>
           <option value="base">BASE</option>
+          <option value="bsc">BSC</option>
         </select>
         <select id="brTo">
           <option value="base">BASE</option>
@@ -153,35 +187,35 @@
         </select>
       </div>
       <div class="grid2" style="margin-top:10px">
-        <input id="brFromToken" placeholder="fromToken (0x… or native token addr supported by route)"/>
-        <input id="brToToken" placeholder="toToken (0x…)"/>
+        <input id="brFromToken" placeholder="fromToken (0x… ERC20 only recommended)"/>
+        <input id="brToToken" placeholder="toToken (0x… ERC20)"/>
       </div>
       <div class="grid3" style="margin-top:10px">
         <input id="brAmt" placeholder="fromAmountWei (integer)"/>
         <input id="brSlip" value="100" placeholder="slippageBps"/>
-        <button class="danger" onclick="bridgeDo()">Execute Bridge</button>
+        <button class="danger" onclick="bridgeGuard()">Execute Bridge</button>
       </div>
-      <div class="small" style="margin-top:8px">Bridge risk: delays, route failures, extra fees. Start with tiny amount.</div>
+      <div class="small" style="margin-top:8px">Bridge risk is higher than swaps. Start tiny.</div>
       <pre id="brOut">{}</pre>
     </div>
 
     <div class="card grow">
-      <h2>SOL Bridge (Coming soon)</h2>
-      <div class="small">SOL↔EVM bridge needs Wormhole-style flow (VAA/relayers). Keeping this disabled to avoid fake “proof”.</div>
-      <pre>{ "status": "disabled", "reason": "needs dedicated SOL↔EVM bridge implementation" }</pre>
+      <h2>SOL↔EVM Bridge</h2>
+      <div class="warn">Disabled (coming soon). SOL↔EVM bridge needs Wormhole-style flow (VAA/relayers). Kept off to avoid fake proof.</div>
+      <pre>{ "status": "disabled" }</pre>
     </div>
   </div>
 
   <!-- HELP -->
   <div class="row hide" id="tab-help">
     <div class="card grow">
-      <h2>Risk / Safety Notes (Agent-enforced)</h2>
+      <h2>Safety Notes (Risk Gate)</h2>
       <ul class="small">
-        <li><b>Use burner wallets</b> on public servers. Never paste your main wallet secret.</li>
-        <li><b>Start with tiny amount</b> (test tx). Confirm output token + decimals.</li>
-        <li><b>Slippage</b>: keep 0.5%–1.5% unless you know what you’re doing. High slippage increases MEV/sandwich risk.</li>
-        <li><b>Unknown tokens</b>: can be honeypot / transfer-tax / blacklist. Agent will warn, but it’s not a guarantee.</li>
-        <li><b>Bridge</b>: adds route/relayer risk. Expect delays, extra fees, and possible failures.</li>
+        <li><b>Use burner wallets</b> on public servers. Never paste main wallet secrets.</li>
+        <li><b>Start tiny</b> and do a test tx first.</li>
+        <li><b>High slippage</b> increases MEV/sandwich risk.</li>
+        <li><b>Unknown tokens</b> may be honeypot/tax/blacklist. Verify before executing.</li>
+        <li><b>Bridge</b> adds route risk, delays, extra fees.</li>
       </ul>
     </div>
   </div>
@@ -190,24 +224,43 @@
 
 <script>
   const $ = (id)=>document.getElementById(id);
-  const apiKeyHeader = ()=> {
-    const k = $('apiKey').value.trim();
-    return k ? {'x-api-key': k} : {};
-  };
   const j = (x)=>JSON.stringify(x,null,2);
-  const show = (el, on)=> el.classList.toggle('hide', !on);
 
-  // Tabs
+  // tabs
   document.querySelectorAll('.tab').forEach(btn=>{
     btn.addEventListener('click', ()=>{
       document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
       btn.classList.add('active');
       const t = btn.dataset.tab;
-      show($('tab-sol'), t==='sol');
-      show($('tab-evm'), t==='evm');
-      show($('tab-bridge'), t==='bridge');
-      show($('tab-help'), t==='help');
+      $('tab-sol').classList.toggle('hide', t!=='sol');
+      $('tab-evm').classList.toggle('hide', t!=='evm');
+      $('tab-bridge').classList.toggle('hide', t!=='bridge');
+      $('tab-help').classList.toggle('hide', t!=='help');
     });
+  });
+
+  function apiKeyHeader(){
+    const k = $('apiKey').value.trim();
+    return k ? {'x-api-key': k} : {};
+  }
+
+  function toggleType(id){
+    const el = $(id);
+    el.type = el.type === 'password' ? 'text' : 'password';
+  }
+
+  function copyText(id){
+    const el = $(id);
+    el.select?.();
+    navigator.clipboard.writeText(el.value || '');
+  }
+
+  // save api key locally
+  window.addEventListener('load', ()=>{
+    const saved = localStorage.getItem('apiKey');
+    if(saved) $('apiKey').value = saved;
+    $('apiKey').addEventListener('input', (e)=>localStorage.setItem('apiKey', e.target.value));
+    health();
   });
 
   async function health(){
@@ -215,24 +268,103 @@
     const data = await r.json();
     $('healthPill').innerHTML = data.ok ? `<span class="ok">●</span> Online` : `<span class="bad">●</span> Offline`;
   }
-  health();
+
+  // ===== Agent =====
+  let lastRoute = null;
+  let lastRisk = null;
 
   function fillDemo(){
-    $('agentInput').value = 'swap 0.01 ETH to USDC on base, slippage 100 bps';
+    $('agentInput').value = 'swap 0.01 ETH to USDC on base slippage 100 bps';
   }
 
   async function agentRun(){
-    const text = $('agentInput').value;
+    const text = $('agentInput').value.trim();
     const r = await fetch('/api/agent', {
       method:'POST',
       headers:{'content-type':'application/json'},
       body: JSON.stringify({ text })
     });
     const data = await r.json();
-    $('agentOut').textContent = j(data.route || {});
-    $('riskOut').textContent = j(data.risk || {});
+    lastRoute = data.route || null;
+    lastRisk = data.risk || null;
+
+    $('agentOut').textContent = j(lastRoute || {});
+    $('riskOut').textContent = j(lastRisk || {});
+
+    // pretty risk box
+    const box = $('riskBox');
+    box.classList.remove('hide');
+    const issues = (lastRisk?.issues || []);
+    const warns = (lastRisk?.warnings || []);
+    if (issues.length) {
+      box.className = 'warn';
+      box.innerHTML = `<b>Blocked:</b><br>${issues.map(x=>`• ${x}`).join('<br>')}`;
+    } else if (warns.length) {
+      box.className = 'warn';
+      box.innerHTML = `<b>Warnings:</b><br>${warns.map(x=>`• ${x}`).join('<br>')}`;
+    } else {
+      box.className = 'good';
+      box.innerHTML = `<b>OK:</b> no major risk flags. Still start small.`;
+    }
   }
 
+  function applyRoute(){
+    if(!lastRoute){ alert('Run Analyze first'); return; }
+
+    const r = lastRoute;
+
+    // chain tab switch
+    if (r.intent === 'bridge') {
+      document.querySelector('[data-tab="bridge"]').click();
+      if (r.chain && ['eth','bsc','base'].includes(r.chain)) $('brFrom').value = r.chain;
+      if (r.slippageBps) $('brSlip').value = r.slippageBps;
+      return;
+    }
+
+    if (r.chain === 'sol') {
+      document.querySelector('[data-tab="sol"]').click();
+      if (r.tokenIn) $('solIn').value = r.tokenIn;
+      if (r.tokenOut) $('solOut').value = r.tokenOut;
+      if (r.slippageBps) $('solSlip').value = r.slippageBps;
+      return;
+    }
+
+    if (r.chain && ['eth','bsc','base'].includes(r.chain)) {
+      document.querySelector('[data-tab="evm"]').click();
+      $('evmChain').value = r.chain;
+      if (r.tokenIn) $('evmSellToken').value = r.tokenIn;
+      if (r.tokenOut) $('evmBuyToken').value = r.tokenOut;
+      if (r.slippageBps) $('evmSlip').value = r.slippageBps;
+      return;
+    }
+
+    alert('Route missing chain/token fields. Provide chain like "base" or paste token addresses.');
+  }
+
+  function guardOk(){
+    if (!lastRisk) return true;
+    return (lastRisk.issues || []).length === 0;
+  }
+
+  // ===== Wallet generators =====
+  async function genSolWallet(){
+    const r = await fetch('/api/gen/sol', { method:'POST', headers:{...apiKeyHeader()} });
+    const data = await r.json();
+    if(!data.ok){ alert(data.error || 'genSol failed'); return; }
+    // put secret into masked textarea
+    $('solSecret').value = data.secretJson;
+    $('solStatus').textContent = j({ ok:true, generated:true, address:data.address, note:'Secret inserted (masked). Click Set Wallet.' });
+  }
+
+  async function genEvmWallet(){
+    const r = await fetch('/api/gen/evm', { method:'POST', headers:{...apiKeyHeader()} });
+    const data = await r.json();
+    if(!data.ok){ alert(data.error || 'genEvm failed'); return; }
+    $('evmPk').value = data.privateKey;
+    $('evmStatus').textContent = j({ ok:true, generated:true, address:data.address, note:'PK inserted (masked). Choose chain and click Set Wallet.' });
+  }
+
+  // ===== SOL actions =====
   async function solSet(){
     const r = await fetch('/api/wallet/sol', {
       method:'POST',
@@ -242,11 +374,18 @@
     $('solStatus').textContent = j(await r.json());
     health();
   }
+
   async function solBal(){
     const r = await fetch('/api/sol/balance');
     $('solStatus').textContent = j(await r.json());
   }
-  async function solSwap(){
+
+  async function solSwapGuard(){
+    // show last agent risk if available, but still allow manual
+    if (lastRisk && (lastRisk.issues || []).length) {
+      alert('Blocked by risk gate (Agent). Fix issues first.');
+      return;
+    }
     const body = {
       inputMint: $('solIn').value.trim(),
       outputMint: $('solOut').value.trim(),
@@ -261,6 +400,7 @@
     $('solOutBox').textContent = j(await r.json());
   }
 
+  // ===== EVM actions =====
   async function evmSet(){
     const body = { chain: $('evmChain').value, privateKey: $('evmPk').value.trim() };
     const r = await fetch('/api/wallet/evm', {
@@ -271,12 +411,18 @@
     $('evmStatus').textContent = j(await r.json());
     health();
   }
+
   async function evmBal(){
     const chain = $('evmChain').value;
     const r = await fetch(`/api/evm/balance?chain=${encodeURIComponent(chain)}`);
     $('evmStatus').textContent = j(await r.json());
   }
-  async function evmSwap(){
+
+  async function evmSwapGuard(){
+    if (lastRisk && (lastRisk.issues || []).length) {
+      alert('Blocked by risk gate (Agent). Fix issues first.');
+      return;
+    }
     const body = {
       chain: $('evmChain').value,
       sellToken: $('evmSellToken').value.trim(),
@@ -292,7 +438,12 @@
     $('evmOutBox').textContent = j(await r.json());
   }
 
-  async function bridgeDo(){
+  // ===== Bridge actions =====
+  async function bridgeGuard(){
+    if (lastRisk && (lastRisk.issues || []).length) {
+      alert('Blocked by risk gate (Agent). Fix issues first.');
+      return;
+    }
     const body = {
       fromChain: $('brFrom').value,
       toChain: $('brTo').value,

@@ -12,7 +12,9 @@ app.use(express.static('public'));
 
 const API_KEY = process.env.API_KEY || '';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.1-70b-versatile';
+
+// ✅ default model baru (biar gak 400 model decommissioned)
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 
 const RPC_ETH = process.env.EVM_RPC_ETH || '';
 const RPC_BSC = process.env.EVM_RPC_BSC || '';
@@ -27,7 +29,7 @@ const CHAIN = {
 };
 
 function requireApiKey(req) {
-  if (!API_KEY) return true; // if not set, allow (not recommended)
+  if (!API_KEY) return true;
   const k = req.headers['x-api-key'];
   return k && k === API_KEY;
 }
@@ -40,7 +42,6 @@ function maskAddr(a) {
 function isEvmAddress(x) {
   return typeof x === 'string' && /^0x[a-fA-F0-9]{40}$/.test(x.trim());
 }
-
 function isProbablySolAddress(x) {
   return typeof x === 'string' && x.trim().length >= 32 && x.trim().length <= 50 && !x.trim().startsWith('0x');
 }
@@ -166,6 +167,7 @@ app.get('/api/health', (req, res) => {
     ok: true,
     apiKeyEnabled: !!API_KEY,
     groq: !!GROQ_API_KEY,
+    groqModel: GROQ_MODEL,
     rpc: {
       sol: SOL_RPC,
       eth: !!RPC_ETH,
@@ -181,7 +183,7 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-/* -------- Generate burner wallets (server-side) -------- */
+/* -------- Generate burner wallets -------- */
 app.post('/api/gen/sol', (req, res) => {
   if (!requireApiKey(req)) return res.status(401).json({ ok: false, error: 'Unauthorized (x-api-key)' });
   try {
@@ -201,11 +203,7 @@ app.post('/api/gen/evm', (req, res) => {
   if (!requireApiKey(req)) return res.status(401).json({ ok: false, error: 'Unauthorized (x-api-key)' });
   try {
     const w = ethers.Wallet.createRandom();
-    res.json({
-      ok: true,
-      address: w.address,
-      privateKey: w.privateKey
-    });
+    res.json({ ok: true, address: w.address, privateKey: w.privateKey });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -236,12 +234,7 @@ app.post('/api/wallet/evm', async (req, res) => {
     mem.evm[chain].wallet = wallet;
     mem.evm[chain].address = await wallet.getAddress();
 
-    res.json({
-      ok: true,
-      chain,
-      address: mem.evm[chain].address,
-      addressMasked: maskAddr(mem.evm[chain].address)
-    });
+    res.json({ ok: true, chain, address: mem.evm[chain].address, addressMasked: maskAddr(mem.evm[chain].address) });
   } catch (e) {
     res.status(400).json({ ok: false, error: e.message });
   }
@@ -278,17 +271,14 @@ app.post('/api/agent', async (req, res) => {
       };
     }
 
-    // Force chain inference if obvious
     if (!route.chain) {
       if (maybeSol) route.chain = 'sol';
-      else if (has0x) route.chain = 'base'; // default to BASE (as you wanted)
+      else if (has0x) route.chain = 'base'; // default base
     }
 
-    // Clamp slippage
     const slip = Math.min(500, Math.max(10, Number(route.slippageBps || 100)));
     route.slippageBps = slip;
 
-    // Decide mode for risk
     const mode = route.intent === 'bridge' ? 'bridge' : 'swap';
     const amountGuess = route.amount || '0';
 
@@ -299,7 +289,6 @@ app.post('/api/agent', async (req, res) => {
       mode
     });
 
-    // Extra warnings if token looks unknown/suspicious
     if (route.intent === 'swap' && route.chain && route.chain !== 'sol' && route.tokenOut && isEvmAddress(route.tokenOut)) {
       risk.warnings.push('Unknown EVM token address — could be honeypot/tax/blacklist. Verify before executing.');
     }
@@ -424,8 +413,6 @@ app.post('/api/evm/swap', async (req, res) => {
     if (!/^\d+$/.test(String(sellAmountWei || ''))) throw new Error('sellAmountWei must be integer string');
 
     const slip = Math.min(500, Math.max(10, Number(slippageBps || 100)));
-
-    // Basic risk gate (slippage focused; wei-human depends on decimals)
     const risk = riskGate({ chain: chainKey, amountInHuman: '0.1', slippageBps: slip, mode: 'swap' });
     if (!risk.ok) return res.status(400).json({ ok: false, error: 'Risk gate failed', risk });
 
@@ -437,7 +424,6 @@ app.post('/api/evm/swap', async (req, res) => {
       slippageBps: slip
     });
 
-    // Approve if ERC20 sell
     const isNativeSell = (sellToken || '').toUpperCase() === 'ETH' || (sellToken || '').toUpperCase() === 'BNB';
     if (!isNativeSell && isEvmAddress(sellToken)) {
       const erc20 = new ethers.Contract(
@@ -512,7 +498,6 @@ app.post('/api/bridge/evm', async (req, res) => {
     const txReq = quote?.transactionRequest;
     if (!txReq?.to || !txReq?.data) throw new Error('LI.FI missing transactionRequest');
 
-    // approve if ERC20
     if (isEvmAddress(fromToken) && quote?.estimate?.approvalAddress) {
       const erc20 = new ethers.Contract(
         fromToken,

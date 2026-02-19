@@ -2,12 +2,6 @@ import { step, info } from "../core/logger.js";
 import { isEvmAddressLike, isSolanaMintLike } from "../core/tokens.js";
 import { fetchDexTokenPairs, pickBestPair, normalizePair } from "../core/dexscreener.js";
 
-/**
- * Analyst:
- * - Auto-detect chain from CA
- * - Fetch Dexscreener market snapshot (best pair by liquidity)
- * - Attach market info to input as `market` (for riskgate & final output)
- */
 export async function agentAnalyst(input) {
   step("ANALYST");
 
@@ -18,7 +12,7 @@ export async function agentAnalyst(input) {
   const tokenIn = String(input.tokenIn).trim();
   const tokenOut = String(input.tokenOut).trim();
 
-  // auto chain detection if not provided
+  // auto chain detect if not provided
   let chain = input.chain ? String(input.chain).toLowerCase() : null;
   if (!chain) {
     if (isEvmAddressLike(tokenIn) || isEvmAddressLike(tokenOut)) chain = "base";
@@ -28,19 +22,19 @@ export async function agentAnalyst(input) {
 
   const out = { ...input, chain, tokenIn, tokenOut };
 
-  // Pull Dexscreener snapshot IF tokenOut looks like CA/mint (or tokenIn), helpful for risk analysis
-  // We try tokenOut first (the thing you are buying), then tokenIn fallback.
-  const probeAddr = isEvmAddressLike(tokenOut) || isSolanaMintLike(tokenOut)
-    ? tokenOut
-    : (isEvmAddressLike(tokenIn) || isSolanaMintLike(tokenIn) ? tokenIn : null);
+  // Dexscreener only makes sense if user provided a CA/mint/0x
+  const probeAddr =
+    isEvmAddressLike(tokenOut) || isSolanaMintLike(tokenOut)
+      ? tokenOut
+      : (isEvmAddressLike(tokenIn) || isSolanaMintLike(tokenIn) ? tokenIn : null);
 
   if (!probeAddr) {
-    info("Analyst: token not a CA/mint -> skip Dexscreener snapshot (symbol mode)");
+    info("Analyst: symbol mode (no CA) -> skip Dexscreener snapshot");
     return out;
   }
 
   try {
-    info(`Analyst: fetching Dexscreener pairs for ${probeAddr} ...`);
+    info(`Analyst: Dexscreener lookup for ${probeAddr} ...`);
     const pairs = await fetchDexTokenPairs(probeAddr);
     const best = pickBestPair(pairs, { chain });
     const snap = normalizePair(best);
@@ -52,15 +46,14 @@ export async function agentAnalyst(input) {
     };
 
     if (snap) {
-      info(`Analyst: best pair ${snap.dex} liquidity=$${Math.round(snap.liquidityUsd)} 24hVol=$${Math.round(snap.volume24hUsd)}`);
+      info(`Analyst: bestPair dex=${snap.dex} liq=$${Math.round(snap.liquidityUsd || 0)} vol24=$${Math.round(snap.volume24hUsd || 0)}`);
     } else {
-      info("Analyst: no matching pair found on Dexscreener for this chain");
+      info("Analyst: no chain-matching pair found on Dexscreener");
     }
 
     return out;
   } catch (e) {
-    // Don't hard-fail if Dexscreener down; riskgate can still run basic checks
-    info(`Analyst: Dexscreener fetch failed (non-fatal): ${e.message}`);
+    info(`Analyst: Dexscreener failed (non-fatal): ${e.message}`);
     return out;
   }
 }

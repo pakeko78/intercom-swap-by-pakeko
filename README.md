@@ -208,11 +208,10 @@ So11111111111111111111111111111111111111112
 
 > Below are real CLI execution results and swap pipeline outputs:
 
-![Proof 1](./assets/proof1.png)
-![Proof 2](./assets/proof2.png)
-![Proof 3](./assets/proof3.png)
-![Proof 4](./assets/proof4.png)
-![Proof 5](./assets/proof5.png)
+![Proof 1](./assets/proof1.jpg)
+![Proof 2](./assets/proof2.jpg)
+![Proof 3](./assets/proof3.jpg)
+![Proof 4](./assets/proof4.jpg)
 
 ---
 

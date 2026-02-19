@@ -1,23 +1,20 @@
 {
-  "name": "intercom-swap-by-pakeko",
-  "version": "4.0.0",
+  "name": "intercom-cli-final",
+  "version": "5.0.0",
   "type": "module",
-  "private": true,
-  "description": "Intercom-style CLI + Web API for swap/bridge with safe DRY_RUN test mode.",
-  "main": "server.js",
+  "main": "src/cli/index.js",
   "scripts": {
-    "start": "node server.js",
-    "web": "node server.js",
-    "cli": "node cli.js",
-    "mode": "bash -lc 'echo \"\\nChoose mode:\\n  1) Web (server)\\n  2) CLI\\n\"; read -p \"Select (1/2): \" opt; if [ \"$opt\" = \"1\" ]; then node server.js; else node cli.js; fi'",
-    "health": "node -e \"import('dotenv/config'); console.log('MODE=',process.env.MODE,'DRY_RUN=',process.env.DRY_RUN)\""
+    "cli": "node src/cli/index.js",
+    "quote": "node src/cli/index.js quote",
+    "swap": "node src/cli/index.js swap",
+    "agent": "node src/cli/index.js agent"
   },
   "dependencies": {
-    "@solana/web3.js": "^1.95.0",
+    "@solana/web3.js": "^1.98.4",
     "bs58": "^5.0.0",
-    "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "ethers": "^6.13.4",
-    "express": "^4.19.2"
+    "ethers": "^6.13.0",
+    "undici": "^6.19.8",
+    "yargs": "^17.7.2"
   }
 }
